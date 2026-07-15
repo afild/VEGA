@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.env
+vega_contracts.db
+data/storage/contracts/*
+!data/storage/contracts/.gitkeep
+.pytest_cache/
+tests/.pytest_cache/
+.venv/

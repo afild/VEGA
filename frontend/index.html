@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VEGA — Vendor & Contract Governance Agent</title>
+    <!-- Fonte moderna do Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="glass-bg"></div>
+
+    <header class="main-header">
+        <div class="header-logo">
+            <span class="logo-icon">🛡️</span>
+            <div>
+                <h1>VEGA</h1>
+                <p>Vendor & Contract Governance Agent</p>
+            </div>
+        </div>
+        <div class="system-status-container">
+            <div id="system-mode-badge" class="badge badge-info">Modo AI: Verificando...</div>
+            <div id="system-status-badge" class="badge badge-success">Sistema: Online</div>
+        </div>
+    </header>
+
+    <main class="dashboard-grid">
+        <!-- Sidebar esquerda: Controle e uploads -->
+        <section class="sidebar-panel">
+            <!-- Dropzone para envio de contratos -->
+            <div class="card glass-card" id="upload-zone-container">
+                <h3 class="card-title">Ingestão de Contratos</h3>
+                <div class="dropzone" id="contract-dropzone">
+                    <span class="dropzone-icon">📥</span>
+                    <p class="dropzone-text">Arraste e solte o PDF/DOCX aqui ou clique para selecionar</p>
+                    <input type="file" id="file-input" accept=".pdf,.docx" style="display: none;">
+                    <div id="upload-vendor-input-group" class="form-group mt-15">
+                        <label for="vendor-name-input">Nome do Fornecedor (Opcional):</label>
+                        <input type="text" id="vendor-name-input" placeholder="Ex: Amazon Web Services">
+                    </div>
+                </div>
+                <div id="upload-progress-container" class="progress-container" style="display: none;">
+                    <div class="progress-bar-bg">
+                        <div class="progress-bar-fill" id="upload-progress-fill"></div>
+                    </div>
+                    <p class="progress-status" id="upload-status-text">Enviando contrato...</p>
+                </div>
+            </div>
+
+            <!-- Lista de contratos -->
+            <div class="card glass-card scrollable-card" id="contracts-list-container">
+                <div class="card-header-flex">
+                    <h3 class="card-title">Contratos Carregados</h3>
+                    <span class="counter-badge" id="contracts-count">0</span>
+                </div>
+                <div class="filter-bar">
+                    <select id="status-filter">
+                        <option value="">Todos os status</option>
+                        <option value="draft">Rascunho (Draft)</option>
+                        <option value="active">Ativo (Active)</option>
+                        <option value="expired">Expirado (Expired)</option>
+                        <option value="terminated">Rescindido (Terminated)</option>
+                    </select>
+                </div>
+                <div class="contracts-list" id="contracts-list">
+                    <!-- Gerado dinamicamente -->
+                    <div class="empty-state">Carregando contratos...</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Seção direita principal: Análise, Visão Geral, Alertas e Visualizador -->
+        <section class="content-panel">
+            <!-- Visão Geral de Saúde Contratual e Alertas -->
+            <div class="stats-row" id="stats-overview-row">
+                <!-- Card de Health Score Médio -->
+                <div class="card glass-card stat-card" id="stat-health-card">
+                    <div class="stat-icon">❤️</div>
+                    <div class="stat-data">
+                        <span class="stat-label">Health Score Médio</span>
+                        <h2 class="stat-value" id="avg-health-score">100.0</h2>
+                        <div class="stat-progress-container">
+                            <div class="stat-progress-bar" id="avg-health-bar" style="width: 100%;"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Card de Contratos com Risco -->
+                <div class="card glass-card stat-card" id="stat-risk-card">
+                    <div class="stat-icon">⚠️</div>
+                    <div class="stat-data">
+                        <span class="stat-label">Contratos Críticos (High)</span>
+                        <h2 class="stat-value" id="critical-contracts-count">0</h2>
+                        <span class="stat-subtext" id="critical-contracts-pct">0% do portfólio</span>
+                    </div>
+                </div>
+
+                <!-- Total de Receita/Custo mapeado -->
+                <div class="card glass-card stat-card" id="stat-financial-card">
+                    <div class="stat-icon">💰</div>
+                    <div class="stat-data">
+                        <span class="stat-label">Total em Contratos</span>
+                        <h2 class="stat-value" id="total-financial-value">$0.00</h2>
+                        <span class="stat-subtext">Mapeamento orçamentário ativo</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Timeline de Renovação -->
+            <div class="card glass-card" id="timeline-card-container">
+                <h3 class="card-title">Linha do Tempo de Renovações (Timeline de Alertas)</h3>
+                <div class="timeline-wrapper">
+                    <div class="timeline" id="renewal-timeline">
+                        <!-- Gerado dinamicamente -->
+                        <div class="empty-state">Nenhum alerta de renovação pendente.</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Visualizador Detalhado de Contrato (Oculto por padrão, exibe ao clicar em um contrato) -->
+            <div class="card glass-card" id="contract-details-viewer" style="display: none;">
+                <div class="viewer-header">
+                    <div>
+                        <h2 id="view-contract-title">Título do Contrato</h2>
+                        <p id="view-contract-vendor" class="vendor-sub">Fornecedor: Carregando...</p>
+                    </div>
+                    <div class="viewer-actions">
+                        <button class="btn btn-secondary" id="btn-reanalyze">🔄 Reanalisar</button>
+                        <a href="#" target="_blank" class="btn btn-primary" id="btn-open-pdf">📄 Abrir PDF</a>
+                        <button class="btn btn-close" id="btn-close-viewer">✖</button>
+                    </div>
+                </div>
+
+                <div class="viewer-grid">
+                    <!-- Coluna Esquerda: Dados Básicos e Finanças -->
+                    <div class="viewer-col-left">
+                        <div class="detail-section">
+                            <h4>Dados e Prazos do Contrato</h4>
+                            <div class="detail-grid">
+                                <div class="detail-item">
+                                    <span class="detail-label">Status</span>
+                                    <span class="badge" id="view-contract-status">Active</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="detail-label">Health Score</span>
+                                    <span class="score-badge" id="view-contract-health">100.0</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="detail-label">Início de Vigência</span>
+                                    <span class="detail-val" id="view-contract-start-date">-</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="detail-label">Término do Contrato</span>
+                                    <span class="detail-val" id="view-contract-end-date">-</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="detail-label">Renovação Automática</span>
+                                    <span class="detail-val" id="view-contract-autorenew">Não</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="detail-label">Aviso Prévio (Notificação)</span>
+                                    <span class="detail-val" id="view-contract-notice-days">30 dias</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="detail-label">Valor do Contrato</span>
+                                    <span class="detail-val font-highlight" id="view-contract-value">$0.00</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="detail-label">Frequência de Pagamento</span>
+                                    <span class="detail-val" id="view-contract-frequency">-</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Chat Q&A com o contrato -->
+                        <div class="chat-section">
+                            <h4>Perguntar ao VEGA sobre o contrato</h4>
+                            <div class="chat-messages" id="chat-box">
+                                <div class="message system-msg">
+                                    Olá! Pergunte-me qualquer dúvida sobre este contrato. Por exemplo: "Posso rescindir este contrato sem pagar multa?" ou "Qual o prazo de aviso prévio para cancelamento?"
+                                </div>
+                            </div>
+                            <div class="chat-input-row">
+                                <input type="text" id="chat-input" placeholder="Digite sua pergunta aqui...">
+                                <button class="btn btn-primary" id="btn-send-chat">Enviar</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Coluna Direita: Cláusulas de Risco Extraídas -->
+                    <div class="viewer-col-right">
+                        <h4>Cláusulas Críticas Extraídas</h4>
+                        <div class="clauses-container" id="clauses-list">
+                            <!-- Gerado dinamicamente -->
+                            <div class="empty-state">Nenhuma cláusula de risco extraída para este contrato.</div>
+                        </div>
+
+                        <div class="negotiation-intel-section mt-20">
+                            <h4>Inteligência de Negociação e Sugestões</h4>
+                            <div class="intel-container" id="intel-list">
+                                <!-- Gerado dinamicamente -->
+                                <div class="empty-state">Carregando sugestões...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Estado Vazio / Inicial quando nenhum contrato está selecionado -->
+            <div class="card glass-card welcome-card" id="welcome-panel">
+                <div class="welcome-content">
+                    <span class="welcome-icon">🛡️</span>
+                    <h2>Bem-vindo ao Painel de Governança VEGA</h2>
+                    <p>Faça o upload de contratos à esquerda ou selecione um contrato existente para avaliar a saúde, visualizar as cláusulas críticas de risco, gerar contrapropostas de mercado e configurar prazos automáticos de expiração e renovação.</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="main-footer">
+        <p>© 2026 VEGA — Vendor & Contract Governance Agent. Em conformidade com NIST AI RMF 1.0.</p>
+    </footer>
+
+    <script src="app.js"></script>
+</body>
+</html>
