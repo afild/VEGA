@@ -1,69 +1,89 @@
 import re
 import logging
 from datetime import datetime, timedelta
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List, Dict, Any
 
 def run_alert_calendar(state: dict) -> dict:
-    """
-    Agente de Alertas e Calendário.
+    """Agente de Alertas e Calendário.
+
     Extrai as datas críticas do contrato (start_date, end_date), notice days e se renova automaticamente.
     Calcula os alertas de renovação/expiração (90d, 60d, 30d antes do limite de cancelamento).
     Regra estrita anti-alucinação: datas são validadas contra regex no texto do documento.
+
+    Args:
+        state (dict): Estado atual do LangGraph (VEGAState).
+
+    Returns:
+        dict: O estado atualizado com as datas e lista de alertas agendados.
     """
-    logging.info(f"[Alert Calendar] Processando datas e alertas para o contrato ID: {state.get('contract_id')}")
-    
-    raw_text = state.get("raw_text", "")
-    
-    # Executa a extração heurística/regex de datas
-    start_date, end_date = extract_dates_from_text(raw_text)
-    auto_renews = detect_auto_renewal(raw_text)
-    notice_days = extract_notice_days(raw_text)
-    
-    # Salva no estado
-    state["start_date"] = start_date
-    state["end_date"] = end_date
-    state["auto_renews"] = 1 if auto_renews else 0
-    state["renewal_notice_days"] = notice_days
-    
-    state["alerts_to_create"] = []
-    
-    if end_date:
-        try:
-            # Converte end_date (string YYYY-MM-DD) para objeto date
-            end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
-            today = datetime.now().date()
-            
-            # Prazo limite para notificar o cancelamento
-            cancel_deadline = end_dt - timedelta(days=notice_days)
-            
-            # Tipos de alerta e datas de trigger
-            alerts_config = [
-                ("renewal_90d", cancel_deadline - timedelta(days=90)),
-                ("renewal_60d", cancel_deadline - timedelta(days=60)),
-                ("renewal_30d", cancel_deadline - timedelta(days=30)),
-                ("expiration", end_dt)
-            ]
-            
-            for alert_type, trigger_date in alerts_config:
-                # Apenas criamos alertas no futuro
-                if trigger_date >= today:
-                    state["alerts_to_create"].append({
-                        "alert_type": alert_type,
-                        "trigger_date": trigger_date.strftime("%Y-%m-%d")
-                    })
-            
-            logging.info(f"[Alert Calendar] Agendados {len(state['alerts_to_create'])} alertas futuros.")
-        except Exception as e:
-            logging.error(f"[Alert Calendar] Erro ao calcular datas de alertas: {e}")
-            
-    state["completed_steps"].append("alert_calendar")
-    return state
+    try:
+        logging.info(f"[Alert Calendar] Processando datas e alertas para o contrato ID: {state.get('contract_id')}")
+        
+        raw_text: str = state.get("raw_text", "")
+        
+        # Executa a extração heurística/regex de datas
+        start_date: Optional[str]
+        end_date: Optional[str]
+        start_date, end_date = extract_dates_from_text(raw_text)
+        auto_renews: bool = detect_auto_renewal(raw_text)
+        notice_days: int = extract_notice_days(raw_text)
+        
+        # Salva no estado
+        state["start_date"] = start_date
+        state["end_date"] = end_date
+        state["auto_renews"] = 1 if auto_renews else 0
+        state["renewal_notice_days"] = notice_days
+        
+        state["alerts_to_create"] = []
+        
+        if end_date:
+            try:
+                # Converte end_date (string YYYY-MM-DD) para objeto date
+                end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+                today = datetime.now().date()
+                
+                # Prazo limite para notificar o cancelamento
+                cancel_deadline = end_dt - timedelta(days=notice_days)
+                
+                # Tipos de alerta e datas de trigger
+                alerts_config = [
+                    ("renewal_90d", cancel_deadline - timedelta(days=90)),
+                    ("renewal_60d", cancel_deadline - timedelta(days=60)),
+                    ("renewal_30d", cancel_deadline - timedelta(days=30)),
+                    ("expiration", end_dt)
+                ]
+                
+                for alert_type, trigger_date in alerts_config:
+                    # Apenas criamos alertas no futuro
+                    if trigger_date >= today:
+                        state["alerts_to_create"].append({
+                            "alert_type": alert_type,
+                            "trigger_date": trigger_date.strftime("%Y-%m-%d")
+                        })
+                
+                logging.info(f"[Alert Calendar] Agendados {len(state['alerts_to_create'])} alertas futuros.")
+            except Exception as e:
+                logging.error(f"[Alert Calendar] Erro ao calcular datas de alertas: {e}")
+                
+        state["completed_steps"].append("alert_calendar")
+        return state
+        
+    except Exception as e:
+        logging.error(f"[Alert Calendar] Erro inesperado e catastrófico no nó: {e}")
+        state.setdefault("risk_flags", []).append("ALERT_CALENDAR_FAILED")
+        return state
 
 
 def extract_dates_from_text(text: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Usa regex para buscar datas de início e término no texto do contrato.
+    """Usa regex para buscar datas de início e término no texto do contrato.
+
     Garante que a data venha do texto original (critério anti-alucinação).
+
+    Args:
+        text (str): Texto bruto do contrato.
+
+    Returns:
+        Tuple[Optional[str], Optional[str]]: A data de início e de término, se encontradas (formato YYYY-MM-DD).
     """
     if not text:
         return None, None
@@ -126,12 +146,12 @@ def extract_dates_from_text(text: str) -> Tuple[Optional[str], Optional[str]]:
         # Mapeia mês para número
         month_lower = month_str.lower()
         month_idx = 1
-        for idx, m in enumerate(months_en):
-            if m in month_lower:
+        for idx, m_name in enumerate(months_en):
+            if m_name in month_lower:
                 month_idx = (idx % 12) + 1
                 break
-        for idx, m in enumerate(months_pt):
-            if m in month_lower:
+        for idx, m_name in enumerate(months_pt):
+            if m_name in month_lower:
                 month_idx = (idx % 12) + 1
                 break
                 
@@ -148,13 +168,8 @@ def extract_dates_from_text(text: str) -> Tuple[Optional[str], Optional[str]]:
     # Ordena datas por posição de aparecimento no documento
     all_dates.sort(key=lambda x: x[0])
     
-    start_date_str = None
-    end_date_str = None
-    
-    # Heurística simples: se encontramos duas ou mais datas
-    # A primeira data que vem depois de palavras de início é start_date
-    # A primeira data que vem depois de palavras de término é end_date
-    # Se não houver contexto claro, assumimos que a menor data é o início e a maior é o término.
+    start_date_str: Optional[str] = None
+    end_date_str: Optional[str] = None
     
     start_keywords = ["effective", "commence", "start", "início", "começo", "vigência", "celebrado", "assinado"]
     end_keywords = ["expire", "terminate", "end", "expiration", "término", "fim", "vence", "vencimento", "valido ate", "válido até"]
@@ -201,14 +216,28 @@ def extract_dates_from_text(text: str) -> Tuple[Optional[str], Optional[str]]:
 
 
 def detect_auto_renewal(text: str) -> bool:
-    """Detecta se o contrato renova automaticamente."""
+    """Detecta se o contrato renova automaticamente.
+
+    Args:
+        text (str): Texto bruto do contrato.
+
+    Returns:
+        bool: Verdadeiro se detectar intenção de renovação automática.
+    """
     terms = ["automatic renew", "auto-renew", "renovação automática", "automatically renew", "renova automaticamente", "renovado automaticamente"]
     text_lower = text.lower()
     return any(term in text_lower for term in terms)
 
 
 def extract_notice_days(text: str) -> int:
-    """Extrai o número de dias de aviso prévio para cancelamento (default 30)."""
+    """Extrai o número de dias de aviso prévio para cancelamento (default 30).
+
+    Args:
+        text (str): Texto bruto do contrato.
+
+    Returns:
+        int: Número de dias exigidos de antecedência.
+    """
     text_lower = text.lower()
     
     # Procura por padrões do tipo: "30 days prior notice", "60 dias de antecedência"
