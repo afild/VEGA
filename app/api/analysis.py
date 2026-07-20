@@ -80,3 +80,27 @@ def get_contract_clauses(id: int, db: Session = Depends(get_db)):
         })
         
     return clauses
+
+@router.get("/value-leakage")
+def get_value_leakage(db: Session = Depends(get_db)):
+    """
+    Project total financial value of contracts that auto-renew.
+    Groups by expiration month.
+    """
+    query = text("""
+        SELECT strftime('%Y-%m', end_date) as exp_month, SUM(financial_value) as total_leakage
+        FROM contracts
+        WHERE auto_renews = 1 AND end_date IS NOT NULL AND status IN ('active', 'draft')
+        GROUP BY strftime('%Y-%m', end_date)
+        ORDER BY exp_month ASC
+    """)
+    result = db.execute(query).fetchall()
+    
+    leakage = []
+    for r in result:
+        leakage.append({
+            "month": r[0],
+            "total_value": r[1] or 0.0
+        })
+        
+    return leakage

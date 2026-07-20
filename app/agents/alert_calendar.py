@@ -1,7 +1,9 @@
 import re
 import logging
+import httpx
 from datetime import datetime, timedelta
 from typing import Tuple, Optional, List, Dict, Any
+from app.config import settings
 
 def run_alert_calendar(state: dict) -> dict:
     """Agente de Alertas e Calendário.
@@ -62,6 +64,17 @@ def run_alert_calendar(state: dict) -> dict:
                         })
                 
                 logging.info(f"[Alert Calendar] Agendados {len(state['alerts_to_create'])} alertas futuros.")
+                
+                # Send Webhook Notification (Epic 4)
+                if settings.SLACK_WEBHOOK_URL and state["alerts_to_create"]:
+                    try:
+                        msg = f"🔔 Novos alertas de contrato agendados! (ID: {state.get('contract_id')})\\n"
+                        for a in state["alerts_to_create"]:
+                            msg += f" - {a['alert_type']} em {a['trigger_date']}\\n"
+                        httpx.post(settings.SLACK_WEBHOOK_URL, json={"text": msg})
+                    except Exception as e:
+                        logging.error(f"[Alert Calendar] Falha ao enviar Webhook: {e}")
+                        
             except Exception as e:
                 logging.error(f"[Alert Calendar] Erro ao calcular datas de alertas: {e}")
                 

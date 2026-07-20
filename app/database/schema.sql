@@ -5,6 +5,9 @@ CREATE TABLE IF NOT EXISTS vendors (
     name                TEXT NOT NULL,
     category            TEXT,
     contact_email       TEXT,
+    ofac_status         TEXT DEFAULT 'unknown',
+    opencorporates_status TEXT DEFAULT 'unknown',
+    risk_score          REAL DEFAULT 0.0,
     created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -50,5 +53,13 @@ CREATE TABLE IF NOT EXISTS negotiation_intel (
     benchmark_type      TEXT NOT NULL,
     market_rate         TEXT,
     suggestion          TEXT NOT NULL,
+    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS playbooks (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    clause_type         TEXT NOT NULL,
+    desired_language    TEXT NOT NULL,
+    fallback_language   TEXT,
     created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
 );

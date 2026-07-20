@@ -41,7 +41,9 @@ const dom = {
     btnCloseViewer: document.getElementById("btn-close-viewer"),
     viewContractTitle: document.getElementById("view-contract-title"),
     viewContractVendor: document.getElementById("view-contract-vendor"),
+    viewVendorRisk: document.getElementById("view-vendor-risk"),
     btnReanalyze: document.getElementById("btn-reanalyze"),
+    btnTerminate: document.getElementById("btn-terminate"),
     btnOpenPdf: document.getElementById("btn-open-pdf"),
     
     // Detalhes do contrato
@@ -74,6 +76,7 @@ function initApp() {
     fetchSystemStatus();
     fetchContracts();
     fetchUpcomingAlerts();
+    fetchValueLeakage();
 }
 
 // --- CONFIGURAÇÃO DE EVENTOS ---
@@ -138,6 +141,13 @@ function setupEventListeners() {
     dom.btnReanalyze.addEventListener("click", () => {
         if (appState.selectedContractId) {
             triggerReanalysis(appState.selectedContractId);
+        }
+    });
+
+    // 1-Click Terminate
+    dom.btnTerminate.addEventListener("click", () => {
+        if (appState.selectedContractId) {
+            triggerTermination(appState.selectedContractId);
         }
     });
 
@@ -337,6 +347,32 @@ async function triggerReanalysis(id) {
     }
 }
 
+// 7.1 Terminate Contrato
+async function triggerTermination(id) {
+    dom.btnTerminate.disabled = true;
+    dom.btnTerminate.innerText = "Gerando Email...";
+    
+    try {
+        const response = await fetch(`${API_BASE}/api/contracts/${id}/terminate`, {
+            method: "POST"
+        });
+        
+        if (response.ok) {
+            const data = await response.json();
+            // Abre o cliente de email do usuário
+            window.location.href = data.mailto;
+        } else {
+            alert("Erro ao gerar cancelamento.");
+        }
+    } catch (error) {
+        console.error(error);
+        alert("Erro na rede ao tentar gerar o cancelamento.");
+    } finally {
+        dom.btnTerminate.disabled = false;
+        dom.btnTerminate.innerText = "🛑 1-Click Terminate";
+    }
+}
+
 // 8. Resolver Alerta
 async function resolveAlert(alertId, eventCard) {
     try {
@@ -499,6 +535,18 @@ function renderContractDetails(c) {
     
     // Renderiza as cláusulas
     renderClausesList(c.clauses);
+    
+    // Atualiza Risk Badge se OFAC foi mapeado (aqui o payload teria de retornar ofac_status, mas se não tiver, defaultamos)
+    // Se precisarmos que o status real venha, seria ideal adicionar no backend, para este protótipo vamos simular
+    // base no health_score ou se a chave vier na API. 
+    dom.viewVendorRisk.style.display = "inline-block";
+    if (c.health_score < 70) {
+        dom.viewVendorRisk.innerText = "Risk: Elevated";
+        dom.viewVendorRisk.className = "badge badge-danger";
+    } else {
+        dom.viewVendorRisk.innerText = "Risk: Clear";
+        dom.viewVendorRisk.className = "badge badge-success";
+    }
 }
 
 // Renderiza a Lista de Cláusulas Extraídas
@@ -680,4 +728,54 @@ function formatCurrency(val) {
         style: "currency",
         currency: "USD"
     }).format(val);
+}
+
+let leakageChartInstance = null;
+
+async function fetchValueLeakage() {
+    try {
+        const response = await fetch(`${API_BASE}/api/analysis/value-leakage`);
+        if (response.ok) {
+            const data = await response.json();
+            renderValueLeakageChart(data);
+        }
+    } catch (e) {
+        console.error("Erro ao buscar value leakage", e);
+    }
+}
+
+function renderValueLeakageChart(data) {
+    const ctx = document.getElementById('leakageChart').getContext('2d');
+    
+    if (leakageChartInstance) {
+        leakageChartInstance.destroy();
+    }
+    
+    const labels = data.map(d => d.month);
+    const values = data.map(d => d.total_value);
+    
+    leakageChartInstance = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Value at Risk ($)',
+                data: values,
+                backgroundColor: 'rgba(239, 68, 68, 0.7)',
+                borderColor: 'rgb(239, 68, 68)',
+                borderWidth: 1,
+                borderRadius: 4
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false }
+            },
+            scales: {
+                y: { beginAtZero: true }
+            }
+        }
+    });
 }

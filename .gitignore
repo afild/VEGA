@@ -7,3 +7,4 @@ data/storage/contracts/*
 .pytest_cache/
 tests/.pytest_cache/
 .venv/
+.temp/

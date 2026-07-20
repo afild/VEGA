@@ -5,6 +5,15 @@ Todas as alterações notáveis neste projeto serão documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 e este projeto adere ao versionamento semântico.
 
+## [0.2.0] - 2026-07-20
+
+### Adicionado
+- **Ingestão Mágica (Zero Data Entry):** Implementado `email_listener.py` integrado nativamente ao `lifespan` do FastAPI para injetar contratos assincronamente via polling IMAP.
+- **Value Leakage & 1-Click Terminate:** Criado endpoint `GET /analysis/value-leakage` e botão no dashboard (integrado com Chart.js e `mailto:`) para projetar perdas financeiras.
+- **Vendor Risk Radar (Integração OFAC):** O banco de dados agora possui as colunas de verificação no vendor (`ofac_status`) usando chamadas externas à API pública americana.
+- **Notificações Integradas (Slack/Teams):** Inseridos disparos `httpx.post()` no calendário de alertas para notificar 90/60/30 dias antecipadamente.
+- **Smart Collaborative Drafting (API do Claude):** Inclusão de `redlining.py` conectando Playbooks salvos à revisão de contratos (via API da Anthropic).
+
 ## [0.1.0] - 2026-06-15
 
 ### Adicionado

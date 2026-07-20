@@ -207,3 +207,41 @@ def get_contract_details(id: int, db: Session = Depends(get_db)):
         "vendor_name": contract_res[12] or "Fornecedor Não Identificado",
         "clauses": clauses
     }
+
+@router.post("/{id}/terminate")
+def generate_termination_email(id: int, db: Session = Depends(get_db)):
+    """
+    Gera um link mailto para cancelamento com base nos dados do contrato.
+    """
+    contract_res = db.execute(
+        text("""
+            SELECT c.title, c.end_date, v.name as vendor_name, v.contact_email
+            FROM contracts c 
+            LEFT JOIN vendors v ON c.vendor_id = v.id
+            WHERE c.id = :id
+        """),
+        {"id": id}
+    ).fetchone()
+    
+    if not contract_res:
+        raise HTTPException(status_code=404, detail="Contrato não encontrado.")
+        
+    title = contract_res[0]
+    end_date = contract_res[1]
+    vendor_name = contract_res[2] or "Vendor"
+    contact_email = contract_res[3] or ""
+    
+    subject = f"Notice of Non-Renewal: {title}"
+    body = f"Dear {vendor_name} team,\\n\\nPlease accept this email as formal notice that we will not be renewing the {title}. "
+    if end_date:
+        body += f"The contract will terminate on {end_date}."
+    else:
+        body += "The contract will terminate at the end of the current term."
+        
+    body += "\\n\\nThank you for your services.\\n\\nSincerely,"
+    
+    return {
+        "mailto": f"mailto:{contact_email}?subject={subject}&body={body}",
+        "subject": subject,
+        "body": body
+    }

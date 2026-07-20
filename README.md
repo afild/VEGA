@@ -30,13 +30,13 @@ Uses SQLite. The full governance pipeline starts simply with `python run.py`.
 </picture>
 
 ### 1. Document Ingestion
-Parses PDF/DOCX contracts using PyMuPDF and LlamaIndex. Identifies Termination, Auto-renewal, and Liability Cap clauses. Maps financial values directly from the contract document.
+Parses PDF/DOCX contracts using PyMuPDF and LlamaIndex. Identifies Termination, Auto-renewal, and Liability Cap clauses. Maps financial values directly from the contract document. **(Novo: Ingestão Mágica via Email/IMAP).**
 
 ### 2. Risk Intelligence
-Computes a contract health score (0–100) based on risk clause analysis (e.g., >60 days notice periods, asymmetric liability caps). Maps total contract value to feed cash flow projections.
+Computes a contract health score (0–100) based on risk clause analysis. Maps total contract value to feed **Value Leakage** cash flow projections. **(Novo: Vendor Risk Radar com integração OFAC).**
 
 ### 3. Agentic Governance
-LangGraph orchestrates seven specialist agents. An alert calendar schedules notifications 90/60/30 days before cancellation windows. A negotiation intelligence agent generates term recommendations, and a RAG Q&A interface answers natural language questions.
+LangGraph orchestrates seven specialist agents. An alert calendar schedules notifications 90/60/30 days before cancellation windows **(integrado com Slack/Teams Webhooks)**. A negotiation intelligence agent generates term recommendations and **Smart Collaborative Drafting (Redlines)** based on internal Playbooks via Claude API.
 
 ---
 
@@ -87,8 +87,10 @@ python run.py
 | Endpoint | Method | Description |
 |---|---|---|
 | `/contracts` | `GET / POST` | List contracts or upload new PDF/DOCX for processing |
+| `/contracts/{id}/terminate`| `POST` | Generate 1-Click Terminate email draft (`mailto:`) |
 | `/alerts` | `GET` | Active deadline alerts (90/60/30-day windows) |
 | `/analysis` | `GET` | Risk health score and clause analysis per contract |
+| `/analysis/value-leakage`| `GET` | Aggregated financial leakage chart data |
 | `/negotiation` | `POST` | Generate negotiation intelligence for a contract |
 | `/system` | `GET` | System status, AI mode (`llm` or `offline`), version |
 

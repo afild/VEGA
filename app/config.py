@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     PORT: int = 8005
     DEBUG: bool = True
     LOG_LEVEL: str = "INFO"
+    
+    # Integrações V2
+    IMAP_SERVER: str = ""
+    IMAP_USER: str = ""
+    IMAP_PASSWORD: str = ""
+    SLACK_WEBHOOK_URL: str = ""
+    OFAC_API_KEY: str = ""
 
     class Config:
         env_file = ".env"
