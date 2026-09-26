@@ -1,67 +1,51 @@
 # run.py
 import sys
-import os
 from pathlib import Path
-import logging
+from importlib.util import find_spec
 
 # Adiciona o diretório atual ao path do Python para permitir importações absolutas de app.
 current_dir = Path(__file__).parent.resolve()
 sys.path.insert(0, str(current_dir))
 
-# Carrega variáveis de ambiente antes de qualquer importação interna
-env_file = current_dir / ".env"
-if env_file.exists():
-    with open(env_file, "r") as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, _, v = line.partition("=")
-                os.environ.setdefault(k.strip(), v.strip())
-
 def check_dependencies():
     """Valida se as dependências fundamentais do VEGA estão instaladas."""
-    required = ["fastapi", "uvicorn", "langchain", "langgraph", "llama_index", "fitz"]
-    missing = []
-    for pkg in required:
-        try:
-            if pkg == "fitz":
-                __import__("fitz")  # PyMuPDF é importado como fitz
-            elif pkg == "llama_index":
-                __import__("llama_index")
-            else:
-                __import__(pkg.replace("-", "_"))
-        except ImportError:
-            missing.append(pkg)
+    required = {
+        "fastapi": "FastAPI",
+        "uvicorn": "Uvicorn",
+        "sqlalchemy": "SQLAlchemy",
+        "pydantic": "Pydantic",
+        "pydantic_settings": "pydantic-settings",
+        "langchain": "LangChain",
+        "langchain_anthropic": "langchain-anthropic",
+        "langgraph": "LangGraph",
+        "llama_index": "LlamaIndex",
+        "fitz": "PyMuPDF",
+        "multipart": "python-multipart",
+    }
+    missing = [label for module, label in required.items() if find_spec(module) is None]
             
     if missing:
         print(f"❌ Dependências ausentes: {', '.join(missing)}")
         print("   Por favor execute: pip install -r requirements.txt")
         sys.exit(1)
 
-def ensure_directories():
+def ensure_directories() -> Path:
     """Garante que a estrutura de diretórios para uploads de PDFs exista."""
-    storage_dir = current_dir / "app" / "data" / "storage" / "contracts"
-    storage_dir.mkdir(parents=True, exist_ok=True)
-    gitkeep_file = storage_dir / ".gitkeep"
-    if not gitkeep_file.exists():
-        with open(gitkeep_file, "w") as f:
-            f.write("")
-    print(f"✅ Diretório de armazenamento de contratos verificado: {storage_dir}")
+    from app.utils.file_storage import ensure_contracts_storage_dir
 
-def initialize_database():
-    """Inicializa o banco SQLite do VEGA (vega_contracts.db)."""
-    from app.database.db_manager import init_db
-    init_db()
-    print("✅ Banco de dados SQLite VEGA inicializado com sucesso.")
+    storage_dir = ensure_contracts_storage_dir()
+    print(f"✅ Diretório de armazenamento de contratos verificado: {storage_dir}")
+    return storage_dir
 
 if __name__ == "__main__":
     check_dependencies()
     ensure_directories()
-    initialize_database()
 
-    port = int(os.environ.get("PORT", 8005))
-    host = os.environ.get("HOST", "127.0.0.1")
-    ai_mode = "LLM (Claude via LangChain)" if os.environ.get("ANTHROPIC_API_KEY") else "Offline Heuristic Fallback"
+    from app.config import settings
+
+    port = settings.PORT
+    host = settings.HOST
+    ai_mode = "LLM (Claude via LangChain)" if settings.ANTHROPIC_API_KEY else "Offline Heuristic Fallback"
 
     print("=" * 65)
     print("   VEGA — Vendor & Contract Governance Agent")
@@ -72,5 +56,5 @@ if __name__ == "__main__":
     print("=" * 65)
 
     import uvicorn
-    # reload=False para produção local e consistência na inicialização única do banco
+    # O lifespan do FastAPI inicializa o banco uma única vez.
     uvicorn.run("app.main:app", host=host, port=port, reload=False)

@@ -1,7 +1,5 @@
 import asyncio
 import logging
-import imaplib
-import email
 from app.config import settings
 
 logger = logging.getLogger(__name__)

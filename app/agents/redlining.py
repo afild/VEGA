@@ -1,5 +1,4 @@
 import logging
-from typing import List, Dict
 from langchain_anthropic import ChatAnthropic
 from langchain.prompts import PromptTemplate
 from app.config import settings

@@ -20,8 +20,8 @@ def run_risk_detector(state: dict) -> dict:
         logging.info(f"[Risk Detector] Analisando riscos do contrato ID: {state.get('contract_id')}")
         
         clauses: List[Dict[str, Any]] = state.get("clauses_found", [])
-        health_score: float = 100.0
-        risk_flags: List[str] = []
+        risk_flags: List[str] = list(state.get("risk_flags", []))
+        highest_risk_by_type: Dict[str, str] = {}
         
         # Padrão regex para extrair dias de notificação (ex: "60 days", "90 dias", "120-day")
         days_pattern = re.compile(r"(\d{2,3})\s*(?:days|dias|day|dia)", re.IGNORECASE)
@@ -91,17 +91,29 @@ def run_risk_detector(state: dict) -> dict:
             clause["risk_level"] = risk_level
             clause["risk_explanation"] = explanation
             
-            # Penaliza o Health Score
+            previous_level = highest_risk_by_type.get(clause_type, "low")
+            risk_rank = {"low": 0, "medium": 1, "high": 2}
+            if risk_rank[risk_level] > risk_rank[previous_level]:
+                highest_risk_by_type[clause_type] = risk_level
+
+        # Um tipo de cláusula é penalizado uma única vez. Várias ocorrências
+        # verbatim da mesma categoria aumentam a evidência, não a penalidade.
+        health_score = 100.0
+        for risk_level in highest_risk_by_type.values():
             if risk_level == "high":
                 health_score -= 25.0
             elif risk_level == "medium":
                 health_score -= 10.0
-
-        # Garante limite inferior do health_score
         health_score = max(0.0, health_score)
+
+        if not clauses:
+            health_score = None
+            warnings = state.setdefault("analysis_warnings", [])
+            if "NO_TARGET_CLAUSES_FOUND" not in warnings:
+                warnings.append("NO_TARGET_CLAUSES_FOUND")
         
         state["health_score"] = health_score
-        state["risk_flags"] = risk_flags
+        state["risk_flags"] = list(dict.fromkeys(risk_flags))
         state["completed_steps"].append("risk_detector")
         
         logging.info(f"[Risk Detector] Concluído. Health Score calculado: {health_score}. Risk Flags: {risk_flags}")

@@ -9,7 +9,11 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script
+        src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"
+        integrity="sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ"
+        crossorigin="anonymous"
+    ></script>
 </head>
 <body>
     <div class="glass-bg"></div>
@@ -40,7 +44,7 @@
                     <input type="file" id="file-input" accept=".pdf,.docx" style="display: none;">
                     <div id="upload-vendor-input-group" class="form-group mt-15">
                         <label for="vendor-name-input">Nome do Fornecedor (Opcional):</label>
-                        <input type="text" id="vendor-name-input" placeholder="Ex: Amazon Web Services">
+                        <input type="text" id="vendor-name-input" maxlength="160" placeholder="Ex: Amazon Web Services">
                     </div>
                 </div>
                 <div id="upload-progress-container" class="progress-container" style="display: none;">
@@ -82,9 +86,9 @@
                     <div class="stat-icon">❤️</div>
                     <div class="stat-data">
                         <span class="stat-label">Health Score Médio</span>
-                        <h2 class="stat-value" id="avg-health-score">100.0</h2>
+                        <h2 class="stat-value" id="avg-health-score">—</h2>
                         <div class="stat-progress-container">
-                            <div class="stat-progress-bar" id="avg-health-bar" style="width: 100%;"></div>
+                            <div class="stat-progress-bar" id="avg-health-bar" style="width: 0%;"></div>
                         </div>
                     </div>
                 </div>
@@ -104,7 +108,7 @@
                     <div class="stat-icon">💰</div>
                     <div class="stat-data">
                         <span class="stat-label">Total em Contratos</span>
-                        <h2 class="stat-value" id="total-financial-value">$0.00</h2>
+                        <h2 class="stat-value" id="total-financial-value">—</h2>
                         <span class="stat-subtext">Mapeamento orçamentário ativo</span>
                     </div>
                 </div>
@@ -140,7 +144,7 @@
                     <div class="viewer-actions">
                         <button class="btn btn-danger" id="btn-terminate">🛑 1-Click Terminate</button>
                         <button class="btn btn-secondary" id="btn-reanalyze">🔄 Reanalisar</button>
-                        <a href="#" target="_blank" class="btn btn-primary" id="btn-open-pdf">📄 Abrir PDF</a>
+                        <a href="#" target="_blank" rel="noopener noreferrer" class="btn btn-primary" id="btn-open-pdf">📄 Abrir PDF</a>
                         <button class="btn btn-close" id="btn-close-viewer">✖</button>
                     </div>
                 </div>
@@ -156,8 +160,12 @@
                                     <span class="badge" id="view-contract-status">Active</span>
                                 </div>
                                 <div class="detail-item">
+                                    <span class="detail-label">Estado da Análise</span>
+                                    <span class="badge" id="view-analysis-status">Não analisado</span>
+                                </div>
+                                <div class="detail-item">
                                     <span class="detail-label">Health Score</span>
-                                    <span class="score-badge" id="view-contract-health">100.0</span>
+                                    <span class="score-badge score-unknown" id="view-contract-health">Não disponível</span>
                                 </div>
                                 <div class="detail-item">
                                     <span class="detail-label">Início de Vigência</span>
@@ -169,21 +177,22 @@
                                 </div>
                                 <div class="detail-item">
                                     <span class="detail-label">Renovação Automática</span>
-                                    <span class="detail-val" id="view-contract-autorenew">Não</span>
+                                    <span class="detail-val" id="view-contract-autorenew">Não identificado</span>
                                 </div>
                                 <div class="detail-item">
                                     <span class="detail-label">Aviso Prévio (Notificação)</span>
-                                    <span class="detail-val" id="view-contract-notice-days">30 dias</span>
+                                    <span class="detail-val" id="view-contract-notice-days">Não identificado</span>
                                 </div>
                                 <div class="detail-item">
                                     <span class="detail-label">Valor do Contrato</span>
-                                    <span class="detail-val font-highlight" id="view-contract-value">$0.00</span>
+                                    <span class="detail-val font-highlight" id="view-contract-value">Não especificado</span>
                                 </div>
                                 <div class="detail-item">
                                     <span class="detail-label">Frequência de Pagamento</span>
                                     <span class="detail-val" id="view-contract-frequency">-</span>
                                 </div>
                             </div>
+                            <div class="analysis-message" id="analysis-message" style="display: none;"></div>
                         </div>
 
                         <!-- Chat Q&A com o contrato -->
@@ -195,7 +204,7 @@
                                 </div>
                             </div>
                             <div class="chat-input-row">
-                                <input type="text" id="chat-input" placeholder="Digite sua pergunta aqui...">
+                                <input type="text" id="chat-input" maxlength="2000" placeholder="Digite sua pergunta aqui...">
                                 <button class="btn btn-primary" id="btn-send-chat">Enviar</button>
                             </div>
                         </div>
@@ -207,6 +216,13 @@
                         <div class="clauses-container" id="clauses-list">
                             <!-- Gerado dinamicamente -->
                             <div class="empty-state">Nenhuma cláusula de risco extraída para este contrato.</div>
+                        </div>
+
+                        <div class="evidence-section mt-20">
+                            <h4>Evidências dos Campos Extraídos</h4>
+                            <div class="evidence-container" id="evidence-list">
+                                <div class="empty-state">Nenhuma evidência estruturada disponível.</div>
+                            </div>
                         </div>
 
                         <div class="negotiation-intel-section mt-20">
@@ -232,7 +248,7 @@
     </main>
 
     <footer class="main-footer">
-        <p>© 2026 VEGA — Vendor & Contract Governance Agent. Em conformidade com NIST AI RMF 1.0.</p>
+        <p>© 2026 VEGA — Vendor & Contract Governance Agent. Projetado com referência ao NIST AI RMF 1.0.</p>
     </footer>
 
     <script src="app.js"></script>

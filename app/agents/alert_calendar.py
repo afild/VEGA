@@ -1,269 +1,506 @@
-import re
 import logging
+import re
+import unicodedata
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from typing import Any, Optional
+
 import httpx
-from datetime import datetime, timedelta
-from typing import Tuple, Optional, List, Dict, Any
+
 from app.config import settings
 
+
+@dataclass(frozen=True)
+class DateCandidate:
+    value: date
+    start: int
+    end: int
+    source_text: str
+    method: str
+    confidence: float
+
+
+MONTHS = {
+    "january": 1,
+    "jan": 1,
+    "janeiro": 1,
+    "fevereiro": 2,
+    "february": 2,
+    "feb": 2,
+    "fev": 2,
+    "march": 3,
+    "marco": 3,
+    "mar": 3,
+    "april": 4,
+    "abril": 4,
+    "apr": 4,
+    "abr": 4,
+    "may": 5,
+    "maio": 5,
+    "mai": 5,
+    "june": 6,
+    "junho": 6,
+    "jun": 6,
+    "july": 7,
+    "julho": 7,
+    "jul": 7,
+    "august": 8,
+    "agosto": 8,
+    "aug": 8,
+    "ago": 8,
+    "september": 9,
+    "setembro": 9,
+    "sep": 9,
+    "sept": 9,
+    "set": 9,
+    "october": 10,
+    "outubro": 10,
+    "oct": 10,
+    "out": 10,
+    "november": 11,
+    "novembro": 11,
+    "nov": 11,
+    "december": 12,
+    "dezembro": 12,
+    "dec": 12,
+    "dez": 12,
+}
+
+MONTH_PATTERN = "|".join(
+    sorted(
+        {"março", "marco", *MONTHS.keys()},
+        key=len,
+        reverse=True,
+    )
+)
+ISO_DATE_PATTERN = re.compile(r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b")
+NUMERIC_DATE_PATTERN = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b")
+MONTH_FIRST_PATTERN = re.compile(
+    rf"\b({MONTH_PATTERN})\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(\d{{4}})\b",
+    re.IGNORECASE,
+)
+DAY_FIRST_PATTERN = re.compile(
+    rf"\b(\d{{1,2}})\s+(?:de\s+)?({MONTH_PATTERN})(?:\s+de)?\s+(\d{{4}})\b",
+    re.IGNORECASE,
+)
+
+START_KEYWORDS = (
+    "effective date",
+    "effective on",
+    "commencement date",
+    "commences on",
+    "starts on",
+    "start date",
+    "data de inicio",
+    "inicio da vigencia",
+    "vigencia inicia",
+    "entra em vigor",
+    "celebrado em",
+    "assinado em",
+)
+END_KEYWORDS = (
+    "expiration date",
+    "expires on",
+    "expire on",
+    "termination date",
+    "terminates on",
+    "ends on",
+    "end date",
+    "valid until",
+    "data de termino",
+    "termino da vigencia",
+    "data de vencimento",
+    "vence em",
+    "valido ate",
+)
+
+
 def run_alert_calendar(state: dict) -> dict:
-    """Agente de Alertas e Calendário.
-
-    Extrai as datas críticas do contrato (start_date, end_date), notice days e se renova automaticamente.
-    Calcula os alertas de renovação/expiração (90d, 60d, 30d antes do limite de cancelamento).
-    Regra estrita anti-alucinação: datas são validadas contra regex no texto do documento.
-
-    Args:
-        state (dict): Estado atual do LangGraph (VEGAState).
-
-    Returns:
-        dict: O estado atualizado com as datas e lista de alertas agendados.
-    """
+    """Extrai datas/prazos, registra evidências e agenda alertas futuros."""
     try:
-        logging.info(f"[Alert Calendar] Processando datas e alertas para o contrato ID: {state.get('contract_id')}")
-        
-        raw_text: str = state.get("raw_text", "")
-        
-        # Executa a extração heurística/regex de datas
-        start_date: Optional[str]
-        end_date: Optional[str]
-        start_date, end_date = extract_dates_from_text(raw_text)
-        auto_renews: bool = detect_auto_renewal(raw_text)
-        notice_days: int = extract_notice_days(raw_text)
-        
-        # Salva no estado
+        logging.info(
+            "[Alert Calendar] Processando contrato ID: %s",
+            state.get("contract_id"),
+        )
+        raw_text = state.get("raw_text", "")
+
+        start_date, end_date, date_evidence, date_warnings = extract_dates_with_evidence(
+            raw_text
+        )
+        auto_renews, renewal_evidence = extract_auto_renewal_with_evidence(raw_text)
+        notice_days, notice_evidence = extract_notice_days_with_evidence(raw_text)
+
         state["start_date"] = start_date
         state["end_date"] = end_date
-        state["auto_renews"] = 1 if auto_renews else 0
+        state["auto_renews"] = (
+            None if auto_renews is None else (1 if auto_renews else 0)
+        )
         state["renewal_notice_days"] = notice_days
-        
         state["alerts_to_create"] = []
-        
+
+        evidence = date_evidence.copy()
+        if renewal_evidence:
+            evidence.append(renewal_evidence)
+        if notice_evidence:
+            evidence.append(notice_evidence)
+        state.setdefault("analysis_evidence", []).extend(evidence)
+
+        warnings = state.setdefault("analysis_warnings", [])
+        _extend_unique(warnings, date_warnings)
+        if auto_renews is None:
+            _extend_unique(warnings, ["AUTO_RENEWAL_NOT_FOUND"])
+        if notice_days is None:
+            _extend_unique(warnings, ["NOTICE_PERIOD_NOT_FOUND"])
+
         if end_date:
-            try:
-                # Converte end_date (string YYYY-MM-DD) para objeto date
-                end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
-                today = datetime.now().date()
-                
-                # Prazo limite para notificar o cancelamento
-                cancel_deadline = end_dt - timedelta(days=notice_days)
-                
-                # Tipos de alerta e datas de trigger
-                alerts_config = [
-                    ("renewal_90d", cancel_deadline - timedelta(days=90)),
-                    ("renewal_60d", cancel_deadline - timedelta(days=60)),
-                    ("renewal_30d", cancel_deadline - timedelta(days=30)),
-                    ("expiration", end_dt)
-                ]
-                
-                for alert_type, trigger_date in alerts_config:
-                    # Apenas criamos alertas no futuro
-                    if trigger_date >= today:
-                        state["alerts_to_create"].append({
-                            "alert_type": alert_type,
-                            "trigger_date": trigger_date.strftime("%Y-%m-%d")
-                        })
-                
-                logging.info(f"[Alert Calendar] Agendados {len(state['alerts_to_create'])} alertas futuros.")
-                
-                # Send Webhook Notification (Epic 4)
-                if settings.SLACK_WEBHOOK_URL and state["alerts_to_create"]:
-                    try:
-                        msg = f"🔔 Novos alertas de contrato agendados! (ID: {state.get('contract_id')})\\n"
-                        for a in state["alerts_to_create"]:
-                            msg += f" - {a['alert_type']} em {a['trigger_date']}\\n"
-                        httpx.post(settings.SLACK_WEBHOOK_URL, json={"text": msg})
-                    except Exception as e:
-                        logging.error(f"[Alert Calendar] Falha ao enviar Webhook: {e}")
-                        
-            except Exception as e:
-                logging.error(f"[Alert Calendar] Erro ao calcular datas de alertas: {e}")
-                
-        state["completed_steps"].append("alert_calendar")
+            end_value = datetime.strptime(end_date, "%Y-%m-%d").date()
+            _schedule_alerts(state, end_value, auto_renews, notice_days)
+
+        state.setdefault("completed_steps", []).append("alert_calendar")
         return state
-        
-    except Exception as e:
-        logging.error(f"[Alert Calendar] Erro inesperado e catastrófico no nó: {e}")
+    except Exception:
+        logging.exception("[Alert Calendar] Falha no agente de datas e alertas.")
         state.setdefault("risk_flags", []).append("ALERT_CALENDAR_FAILED")
         return state
 
 
-def extract_dates_from_text(text: str) -> Tuple[Optional[str], Optional[str]]:
-    """Usa regex para buscar datas de início e término no texto do contrato.
+def extract_dates_from_text(text: str) -> tuple[Optional[str], Optional[str]]:
+    """Interface compatível que retorna somente início e término."""
+    start_date, end_date, _, _ = extract_dates_with_evidence(text)
+    return start_date, end_date
 
-    Garante que a data venha do texto original (critério anti-alucinação).
 
-    Args:
-        text (str): Texto bruto do contrato.
-
-    Returns:
-        Tuple[Optional[str], Optional[str]]: A data de início e de término, se encontradas (formato YYYY-MM-DD).
-    """
+def extract_dates_with_evidence(
+    text: str,
+) -> tuple[Optional[str], Optional[str], list[dict[str, Any]], list[str]]:
+    """Extrai apenas datas válidas com função contratual sustentada pelo contexto."""
     if not text:
-        return None, None
-        
-    # Expressões regulares para vários formatos de datas comuns:
-    # 1. YYYY-MM-DD
-    # 2. DD/MM/YYYY ou MM/DD/YYYY
-    # 3. Formato escrito: Month DD, YYYY ou DD de Month de YYYY
-    
-    # Padrão numérico genérico: dd/mm/aaaa ou mm/dd/aaaa
-    numeric_date_regex = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b")
-    # Padrão YYYY-MM-DD
-    iso_date_regex = re.compile(r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b")
-    
-    months_en = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december",
-                 "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
-    months_pt = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
-                 "jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"]
-    
-    all_months = months_en + months_pt
-    months_pattern = "|".join(all_months)
-    
-    # Padrão extenso: "December 31, 2026" ou "31 de dezembro de 2026" ou "December 31st, 2026"
-    written_date_regex = re.compile(
-        r"\b(\d{1,2})?(?:\s*(?:de|of)?\s*)?(" + months_pattern + r")\s*(?:\d{1,2}(?:st|nd|rd|th)?)?,?\s*(?:de|of|,)?,?\s*(\d{4})\b", 
-        re.IGNORECASE
+        return None, None, [], ["CONTRACT_DATES_NOT_FOUND"]
+
+    candidates, warnings = _date_candidates(text)
+    if not candidates:
+        return None, None, [], list(dict.fromkeys([*warnings, "CONTRACT_DATES_NOT_FOUND"]))
+
+    folded_text = _fold(text)
+    classified: dict[str, list[tuple[int, DateCandidate]]] = {
+        "start_date": [],
+        "end_date": [],
+    }
+    unclassified: list[DateCandidate] = []
+
+    for candidate in candidates:
+        start_distance = _nearest_keyword_distance(
+            folded_text, candidate.start, candidate.end, START_KEYWORDS
+        )
+        end_distance = _nearest_keyword_distance(
+            folded_text, candidate.start, candidate.end, END_KEYWORDS
+        )
+        if start_distance is None and end_distance is None:
+            unclassified.append(candidate)
+        elif end_distance is None or (
+            start_distance is not None and start_distance < end_distance
+        ):
+            classified["start_date"].append((start_distance or 0, candidate))
+        else:
+            classified["end_date"].append((end_distance or 0, candidate))
+
+    _classify_date_ranges(text, unclassified, classified)
+    start_candidate = _select_classified_candidate(
+        classified["start_date"], "MULTIPLE_START_DATES_FOUND", warnings
+    )
+    end_candidate = _select_classified_candidate(
+        classified["end_date"], "MULTIPLE_END_DATES_FOUND", warnings
     )
 
-    all_dates = []
-    
-    # 1. Procura datas numéricas ISO (YYYY-MM-DD)
-    for match in iso_date_regex.finditer(text):
-        y, m, d = match.groups()
-        try:
-            dt = datetime(int(y), int(m), int(d)).date()
-            all_dates.append((match.start(), dt))
-        except ValueError:
-            continue
-            
-    # 2. Procura datas numéricas padrão (DD/MM/YYYY ou MM/DD/YYYY)
-    for match in numeric_date_regex.finditer(text):
-        p1, p2, y = match.groups()
-        # Tentamos interpretar como DD/MM/YYYY primeiro, depois MM/DD/YYYY
-        dt = None
-        try:
-            dt = datetime(int(y), int(p2), int(p1)).date() # DD/MM/YYYY
-        except ValueError:
-            try:
-                dt = datetime(int(y), int(p1), int(p2)).date() # MM/DD/YYYY
-            except ValueError:
-                pass
-        if dt:
-            all_dates.append((match.start(), dt))
-            
-    # 3. Procura datas por extenso
-    for match in written_date_regex.finditer(text):
-        day_str, month_str, year_str = match.groups()
-        day = int(day_str) if day_str else 1
-        
-        # Mapeia mês para número
-        month_lower = month_str.lower()
-        month_idx = 1
-        for idx, m_name in enumerate(months_en):
-            if m_name in month_lower:
-                month_idx = (idx % 12) + 1
-                break
-        for idx, m_name in enumerate(months_pt):
-            if m_name in month_lower:
-                month_idx = (idx % 12) + 1
-                break
-                
-        try:
-            dt = datetime(int(year_str), month_idx, day).date()
-            all_dates.append((match.start(), dt))
-        except ValueError:
-            continue
-            
-    # Classifica as datas encontradas com base no contexto textual
-    if not all_dates:
-        return None, None
-        
-    # Ordena datas por posição de aparecimento no documento
-    all_dates.sort(key=lambda x: x[0])
-    
-    start_date_str: Optional[str] = None
-    end_date_str: Optional[str] = None
-    
-    start_keywords = ["effective", "commence", "start", "início", "começo", "vigência", "celebrado", "assinado"]
-    end_keywords = ["expire", "terminate", "end", "expiration", "término", "fim", "vence", "vencimento", "valido ate", "válido até"]
-    
-    start_dt = None
-    end_dt = None
-    
-    for idx, dt in all_dates:
-        # Pega a janela de texto anterior a data (100 caracteres)
-        context = text[max(0, idx - 100):idx].lower()
-        
-        is_start = any(k in context for k in start_keywords)
-        is_end = any(k in context for k in end_keywords)
-        
-        if is_start and not start_dt:
-            start_dt = dt
-        elif is_end and not end_dt:
-            end_dt = dt
-            
-    # Fallback se a heurística de contexto falhar
-    extracted_dts = [d[1] for d in all_dates]
-    if not start_dt and extracted_dts:
-        start_dt = min(extracted_dts)
-    if not end_dt and extracted_dts:
-        # Se houver apenas uma data e ela for no futuro, pode ser o end_date
-        if len(extracted_dts) == 1:
-            if extracted_dts[0] > datetime.now().date():
-                end_dt = extracted_dts[0]
-                start_dt = None
-        else:
-            end_dt = max(extracted_dts)
-            
-    # Se start e end forem iguais, não faz sentido
-    if start_dt == end_dt and len(extracted_dts) > 1:
-        end_dt = max(extracted_dts)
-        start_dt = min(extracted_dts)
+    if start_candidate and end_candidate and start_candidate.value > end_candidate.value:
+        warnings.append("INVALID_CONTRACT_DATE_RANGE")
+        return None, None, [], list(dict.fromkeys(warnings))
 
-    if start_dt:
-        start_date_str = start_dt.strftime("%Y-%m-%d")
-    if end_dt:
-        end_date_str = end_dt.strftime("%Y-%m-%d")
-        
-    return start_date_str, end_date_str
+    evidence: list[dict[str, Any]] = []
+    if start_candidate:
+        evidence.append(_date_evidence("start_date", start_candidate))
+    if end_candidate:
+        evidence.append(_date_evidence("end_date", end_candidate))
+    if not start_candidate and not end_candidate:
+        warnings.append("CONTRACT_DATES_NOT_CONTEXTUALIZED")
+
+    return (
+        start_candidate.value.isoformat() if start_candidate else None,
+        end_candidate.value.isoformat() if end_candidate else None,
+        evidence,
+        list(dict.fromkeys(warnings)),
+    )
 
 
 def detect_auto_renewal(text: str) -> bool:
-    """Detecta se o contrato renova automaticamente.
-
-    Args:
-        text (str): Texto bruto do contrato.
-
-    Returns:
-        bool: Verdadeiro se detectar intenção de renovação automática.
-    """
-    terms = ["automatic renew", "auto-renew", "renovação automática", "automatically renew", "renova automaticamente", "renovado automaticamente"]
-    text_lower = text.lower()
-    return any(term in text_lower for term in terms)
+    """Retorna verdadeiro somente quando há renovação automática afirmativa."""
+    value, _ = extract_auto_renewal_with_evidence(text)
+    return value is True
 
 
-def extract_notice_days(text: str) -> int:
-    """Extrai o número de dias de aviso prévio para cancelamento (default 30).
-
-    Args:
-        text (str): Texto bruto do contrato.
-
-    Returns:
-        int: Número de dias exigidos de antecedência.
-    """
-    text_lower = text.lower()
-    
-    # Procura por padrões do tipo: "30 days prior notice", "60 dias de antecedência"
+def extract_auto_renewal_with_evidence(
+    text: str,
+) -> tuple[Optional[bool], Optional[dict[str, Any]]]:
     pattern = re.compile(
-        r"(\d{2,3})\s*(?:days|dias)\s*(?:prior|before|notice|written notice|de antecedência|aviso prévio|de aviso)", 
-        re.IGNORECASE
+        r"automatic(?:ally)?\s+renew(?:al|ed|s)?|auto-renew(?:al)?|"
+        r"renew(?:ed|s)?\s+automatically|renova(?:ção|do|r)?\s+autom[aá]tica(?:mente)?|"
+        r"prorroga(?:ção|do)?\s+autom[aá]tica(?:mente)?",
+        re.IGNORECASE,
     )
-    
-    match = pattern.search(text_lower)
-    if match:
+    match = pattern.search(text)
+    if not match:
+        return None, None
+
+    lookback = _fold(text[max(0, match.start() - 35):match.start()])
+    negated = bool(re.search(r"\b(?:not|no|never|nao|nunca)\b", lookback))
+    value = not negated
+    return value, {
+        "field_name": "auto_renews",
+        "normalized_value": "true" if value else "false",
+        "source_text": text[match.start():match.end()],
+        "source_start": match.start(),
+        "source_end": match.end(),
+        "extraction_method": "renewal_phrase_context",
+        "confidence": 0.9 if negated else 0.95,
+    }
+
+
+def extract_notice_days(text: str) -> Optional[int]:
+    """Retorna o aviso prévio expresso; não aplica valor padrão inventado."""
+    value, _ = extract_notice_days_with_evidence(text)
+    return value
+
+
+def extract_notice_days_with_evidence(
+    text: str,
+) -> tuple[Optional[int], Optional[dict[str, Any]]]:
+    patterns = (
+        re.compile(
+            r"\b(\d{1,3})\s*(?:calendar\s+|business\s+|úteis\s+)?(?:days|dias)\s+"
+            r"(?:prior(?:\s+written)?\s+notice|before|notice|de antecedência|"
+            r"de aviso(?:\s+prévio)?|aviso prévio)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?:notice|aviso(?:\s+prévio)?)\s+(?:of|de)\s+(\d{1,3})\s*(?:days|dias)\b",
+            re.IGNORECASE,
+        ),
+    )
+    matches = [match for pattern in patterns if (match := pattern.search(text))]
+    if not matches:
+        return None, None
+
+    match = min(matches, key=lambda item: item.start())
+    value = int(match.group(1))
+    if value <= 0 or value > 365:
+        return None, None
+    return value, {
+        "field_name": "renewal_notice_days",
+        "normalized_value": str(value),
+        "source_text": text[match.start():match.end()],
+        "source_start": match.start(),
+        "source_end": match.end(),
+        "extraction_method": "notice_period_regex",
+        "confidence": 0.95,
+    }
+
+
+def _date_candidates(text: str) -> tuple[list[DateCandidate], list[str]]:
+    candidates: list[DateCandidate] = []
+    occupied: list[tuple[int, int]] = []
+    warnings: list[str] = []
+
+    def add_candidate(match: re.Match[str], value: date, method: str, confidence: float) -> None:
+        span = match.span()
+        if any(span[0] < end and span[1] > start for start, end in occupied):
+            return
+        occupied.append(span)
+        candidates.append(
+            DateCandidate(value, span[0], span[1], match.group(0), method, confidence)
+        )
+
+    for match in ISO_DATE_PATTERN.finditer(text):
+        year, month, day = map(int, match.groups())
         try:
-            return int(match.group(1))
+            add_candidate(match, date(year, month, day), "iso_date_regex", 0.99)
         except ValueError:
-            pass
-            
-    return 30  # Default regulamentar do SDD
+            warnings.append("INVALID_DATE_IGNORED")
+
+    for pattern, month_first in (
+        (MONTH_FIRST_PATTERN, True),
+        (DAY_FIRST_PATTERN, False),
+    ):
+        for match in pattern.finditer(text):
+            if month_first:
+                month_name, day_raw, year_raw = match.groups()
+            else:
+                day_raw, month_name, year_raw = match.groups()
+            month = MONTHS.get(_fold(month_name))
+            try:
+                if month is not None:
+                    add_candidate(
+                        match,
+                        date(int(year_raw), month, int(day_raw)),
+                        "written_date_regex",
+                        0.98,
+                    )
+            except ValueError:
+                warnings.append("INVALID_DATE_IGNORED")
+
+    for match in NUMERIC_DATE_PATTERN.finditer(text):
+        first, second, year = map(int, match.groups())
+        try:
+            if first > 12 and second <= 12:
+                value = date(year, second, first)
+            elif second > 12 and first <= 12:
+                value = date(year, first, second)
+            elif first == second:
+                value = date(year, second, first)
+            else:
+                warnings.append("AMBIGUOUS_NUMERIC_DATE_IGNORED")
+                continue
+            add_candidate(match, value, "unambiguous_numeric_date_regex", 0.9)
+        except ValueError:
+            warnings.append("INVALID_DATE_IGNORED")
+
+    candidates.sort(key=lambda candidate: candidate.start)
+    return candidates, warnings
+
+
+def _nearest_keyword_distance(
+    folded_text: str,
+    start: int,
+    end: int,
+    keywords: tuple[str, ...],
+) -> Optional[int]:
+    distances: list[int] = []
+    before_start = max(0, start - 140)
+    after_end = min(len(folded_text), end + 55)
+    for keyword in keywords:
+        folded_keyword = _fold(keyword)
+        before_position = folded_text.rfind(folded_keyword, before_start, start)
+        if before_position >= 0:
+            distances.append(start - (before_position + len(folded_keyword)))
+        after_position = folded_text.find(folded_keyword, end, after_end)
+        if after_position >= 0:
+            # Rótulos anteriores ("Effective Date: ...") são muito mais
+            # comuns e específicos. Ainda aceitamos rótulo posterior, mas com
+            # penalidade para ele não capturar a data da frase anterior.
+            distances.append((after_position - end) + 40)
+    return min(distances) if distances else None
+
+
+def _classify_date_ranges(
+    text: str,
+    candidates: list[DateCandidate],
+    classified: dict[str, list[tuple[int, DateCandidate]]],
+) -> None:
+    for first, second in zip(candidates, candidates[1:]):
+        between = _fold(text[first.end:second.start])
+        before = _fold(text[max(0, first.start - 60):first.start])
+        connector = re.search(r"\b(?:to|through|until|ate)\b", between)
+        range_lead = re.search(r"\b(?:from|period|term|vigencia|de)\b", before)
+        if connector and range_lead:
+            classified["start_date"].append((80, first))
+            classified["end_date"].append((80, second))
+
+
+def _select_classified_candidate(
+    values: list[tuple[int, DateCandidate]],
+    warning: str,
+    warnings: list[str],
+) -> Optional[DateCandidate]:
+    if not values:
+        return None
+    unique = {(candidate.start, candidate.end): (distance, candidate) for distance, candidate in values}
+    ranked = sorted(unique.values(), key=lambda item: (item[0], item[1].start))
+    if len(ranked) > 1:
+        warnings.append(warning)
+    return ranked[0][1]
+
+
+def _date_evidence(field_name: str, candidate: DateCandidate) -> dict[str, Any]:
+    return {
+        "field_name": field_name,
+        "normalized_value": candidate.value.isoformat(),
+        "source_text": candidate.source_text,
+        "source_start": candidate.start,
+        "source_end": candidate.end,
+        "extraction_method": candidate.method,
+        "confidence": candidate.confidence,
+    }
+
+
+def _schedule_alerts(
+    state: dict,
+    end_date: date,
+    auto_renews: Optional[bool],
+    notice_days: Optional[int],
+) -> None:
+    today = datetime.now().date()
+    alerts: list[tuple[str, date]] = [("expiration", end_date)]
+
+    if auto_renews is True:
+        if notice_days is None:
+            _extend_unique(
+                state.setdefault("analysis_warnings", []),
+                ["RENEWAL_DEADLINE_UNAVAILABLE"],
+            )
+        else:
+            cancellation_deadline = end_date - timedelta(days=notice_days)
+            alerts.extend(
+                (f"renewal_{days}d", cancellation_deadline - timedelta(days=days))
+                for days in (90, 60, 30)
+            )
+    else:
+        alerts.extend(
+            (f"expiration_{days}d", end_date - timedelta(days=days))
+            for days in (90, 60, 30)
+        )
+
+    state["alerts_to_create"] = [
+        {"alert_type": alert_type, "trigger_date": trigger_date.isoformat()}
+        for alert_type, trigger_date in alerts
+        if trigger_date >= today
+    ]
+    logging.info(
+        "[Alert Calendar] Agendados %s alertas futuros.",
+        len(state["alerts_to_create"]),
+    )
+
+
+def notify_alert_webhook(state: dict) -> None:
+    """Notifica somente depois que o orquestrador confirma o commit da análise."""
+    if not settings.SLACK_WEBHOOK_URL or not state.get("alerts_to_create"):
+        return
+    try:
+        lines = [
+            f"🔔 Novos alertas de contrato agendados! (ID: {state.get('contract_id')})"
+        ]
+        lines.extend(
+            f" - {alert['alert_type']} em {alert['trigger_date']}"
+            for alert in state["alerts_to_create"]
+        )
+        response = httpx.post(
+            settings.SLACK_WEBHOOK_URL,
+            json={"text": "\n".join(lines)},
+            timeout=5.0,
+        )
+        response.raise_for_status()
+    except Exception:
+        logging.exception("[Alert Calendar] Falha ao enviar webhook de alertas.")
+        _extend_unique(
+            state.setdefault("analysis_warnings", []),
+            ["ALERT_WEBHOOK_FAILED"],
+        )
+
+
+def _fold(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value.casefold())
+    return "".join(char for char in normalized if not unicodedata.combining(char))
+
+
+def _extend_unique(target: list[str], values: list[str]) -> None:
+    for value in values:
+        if value not in target:
+            target.append(value)

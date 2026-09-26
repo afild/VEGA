@@ -1,4 +1,3 @@
-import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -39,7 +38,7 @@ def list_upcoming_alerts(db: Session = Depends(get_db)):
         
     return alerts
 
-@router.patch("/{id}/resolve")
+@router.patch("/{id:int}/resolve")
 def resolve_alert(id: int, db: Session = Depends(get_db)):
     """
     Marca um alerta contratual específico como resolvido.

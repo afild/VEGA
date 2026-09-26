@@ -1,5 +1,4 @@
 import logging
-import httpx
 from app.config import settings
 from app.database.db_manager import get_db
 from sqlalchemy.orm import Session

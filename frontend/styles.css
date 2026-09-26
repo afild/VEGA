@@ -153,7 +153,7 @@ body {
 .dashboard-grid {
   flex: 1;
   display: grid;
-  grid-template-columns: 360px 1fr;
+  grid-template-columns: 360px minmax(0, 1fr);
   gap: 25px;
   padding: 25px 40px;
   max-width: 1800px;
@@ -172,6 +172,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 25px;
+  min-width: 0;
 }
 
 /* Cards Glassmorphic */
@@ -385,15 +386,22 @@ body {
   border-color: rgba(239, 68, 68, 0.3);
 }
 
+.score-unknown {
+  background: rgba(156, 163, 175, 0.12);
+  color: var(--text-secondary);
+  border-color: rgba(156, 163, 175, 0.3);
+}
+
 /* Stats Row (Painel de Métricas) */
 .stats-row {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 20px;
 }
 
 .stat-card {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 20px;
   padding: 24px;
@@ -414,6 +422,8 @@ body {
 
 .stat-data {
   flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .stat-label {
@@ -520,6 +530,9 @@ body {
 /* Visualizador Detalhado de Contrato */
 .viewer-header {
   display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  overflow-wrap: anywhere;
   justify-content: space-between;
   align-items: flex-start;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
@@ -540,12 +553,13 @@ body {
 
 .viewer-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
 .viewer-grid {
   display: grid;
-  grid-template-columns: 1fr 1.1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
   gap: 25px;
 }
 
@@ -553,6 +567,8 @@ body {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .detail-section {
@@ -573,7 +589,7 @@ body {
 
 .detail-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -591,6 +607,17 @@ body {
 .detail-val {
   font-size: 0.85rem;
   font-weight: 500;
+}
+
+.analysis-message {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: var(--border-radius-sm);
+  border-left: 3px solid var(--color-medium-risk);
+  background: rgba(245, 158, 11, 0.08);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.45;
 }
 
 .font-highlight {
@@ -670,13 +697,43 @@ body {
 }
 
 /* Cláusulas de Risco */
-.clauses-container, .intel-container {
+.clauses-container, .intel-container, .evidence-container {
   display: flex;
   flex-direction: column;
   gap: 12px;
   max-height: 250px;
   overflow-y: auto;
   padding-right: 5px;
+}
+
+.evidence-card {
+  background: rgba(59, 130, 246, 0.04);
+  border: 1px solid rgba(59, 130, 246, 0.16);
+  border-radius: var(--border-radius-md);
+  padding: 12px;
+}
+
+.evidence-field {
+  color: hsl(210, 100%, 70%);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.evidence-value {
+  color: var(--text-primary);
+  font-size: 0.78rem;
+  margin-top: 3px;
+}
+
+.evidence-source {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-style: italic;
+  line-height: 1.4;
+  margin-top: 8px;
+  padding-left: 9px;
+  border-left: 2px solid rgba(59, 130, 246, 0.4);
+  overflow-wrap: anywhere;
 }
 
 .clause-card, .intel-card {
@@ -881,6 +938,55 @@ body {
   border-top: 1px solid rgba(255, 255, 255, 0.03);
   margin-top: auto;
   background: rgba(0, 0, 0, 0.15);
+}
+
+/* Keep loaded charts, long values and analysis evidence inside the viewport. */
+@media (max-width: 1400px) {
+  .viewer-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .stat-card {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
+@media (max-width: 900px) {
+  .main-header,
+  .system-status-container {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .main-header,
+  .dashboard-grid {
+    padding: 20px;
+  }
+
+  .dashboard-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .scrollable-card {
+    max-height: 360px;
+  }
+}
+
+@media (max-width: 540px) {
+  .stats-row,
+  .detail-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .stat-card {
+    flex-direction: row;
+    align-items: center;
+  }
+
+  .chat-input-row input {
+    min-width: 0;
+  }
 }
 
 /* Custom Scrollbar */

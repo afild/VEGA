@@ -6,10 +6,32 @@ const appState = {
     selectedContractId: null,
     alerts: [],
     statusFilter: "",
+    maxUploadSizeMb: 25,
+    pollingContracts: new Set(),
 };
 
 // URL Base da API (vazio se servido localmente a partir da raiz do FastAPI)
 const API_BASE = "";
+
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+}
+
+function finiteNumber(value, fallback = 0) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+}
+
+function optionalFiniteNumber(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+}
 
 // Elementos da DOM
 const dom = {
@@ -48,6 +70,8 @@ const dom = {
     
     // Detalhes do contrato
     viewContractStatus: document.getElementById("view-contract-status"),
+    viewAnalysisStatus: document.getElementById("view-analysis-status"),
+    analysisMessage: document.getElementById("analysis-message"),
     viewContractHealth: document.getElementById("view-contract-health"),
     viewContractStartDate: document.getElementById("view-contract-start-date"),
     viewContractEndDate: document.getElementById("view-contract-end-date"),
@@ -63,6 +87,7 @@ const dom = {
     
     // Listas internas
     clausesList: document.getElementById("clauses-list"),
+    evidenceList: document.getElementById("evidence-list"),
     intelList: document.getElementById("intel-list"),
 };
 
@@ -168,6 +193,7 @@ async function fetchSystemStatus() {
         const response = await fetch(`${API_BASE}/api/system/status`);
         if (response.ok) {
             const data = await response.json();
+            appState.maxUploadSizeMb = finiteNumber(data.max_upload_size_mb, 25);
             
             // Atualiza o modo AI
             if (data.ai_mode === "llm") {
@@ -229,13 +255,17 @@ async function fetchContractDetails(id) {
         const response = await fetch(`${API_BASE}/api/contracts/${id}`);
         if (response.ok) {
             const contract = await response.json();
-            renderContractDetails(contract);
-            fetchNegotiationSuggestions(id);
+            if (appState.selectedContractId === id) {
+                renderContractDetails(contract);
+                fetchNegotiationSuggestions(id);
+            }
+            return contract;
         }
     } catch (error) {
         console.error("Erro ao carregar detalhes do contrato:", error);
         alert("Não foi possível carregar os detalhes deste contrato.");
     }
+    return null;
 }
 
 // 5. Sugestões de Negociação
@@ -245,7 +275,7 @@ async function fetchNegotiationSuggestions(id) {
         const response = await fetch(`${API_BASE}/api/contracts/${id}/negotiation-intel`);
         if (response.ok) {
             const suggestions = await response.json();
-            renderNegotiationSuggestions(suggestions);
+            if (appState.selectedContractId === id) renderNegotiationSuggestions(suggestions);
         }
     } catch (error) {
         console.error("Erro ao carregar sugestões de negociação:", error);
@@ -256,6 +286,23 @@ async function fetchNegotiationSuggestions(id) {
 // 6. Upload de Contrato
 async function handleFileUpload(file) {
     const vendorName = dom.vendorNameInput.value.trim();
+    const extension = file.name.includes(".")
+        ? `.${file.name.split(".").pop().toLowerCase()}`
+        : "";
+    const allowedExtensions = new Set([".pdf", ".docx"]);
+
+    if (!allowedExtensions.has(extension)) {
+        showUploadValidationError("Apenas arquivos PDF ou DOCX são permitidos.");
+        return;
+    }
+
+    const maxUploadBytes = appState.maxUploadSizeMb * 1024 * 1024;
+    if (file.size > maxUploadBytes) {
+        showUploadValidationError(
+            `O arquivo excede o limite de ${appState.maxUploadSizeMb} MB.`
+        );
+        return;
+    }
     
     const formData = new FormData();
     formData.append("file", file);
@@ -268,10 +315,11 @@ async function handleFileUpload(file) {
     dom.uploadProgressFill.style.width = "0%";
     dom.uploadStatusText.innerText = "Enviando arquivo...";
     
+    let interval = null;
     try {
         // Animação mockada de upload rápida, finalizando com a resposta do servidor
         let width = 0;
-        const interval = setInterval(() => {
+        interval = setInterval(() => {
             if (width < 85) {
                 width += 5;
                 dom.uploadProgressFill.style.width = `${width}%`;
@@ -301,12 +349,14 @@ async function handleFileUpload(file) {
                 
                 // Seleciona automaticamente o contrato recém enviado
                 selectContractItem(data.contract_id);
+                pollAnalysisUntilTerminal(data.contract_id);
             }, 1500);
         } else {
             const errData = await response.json();
             throw new Error(errData.detail || "Erro no upload.");
         }
     } catch (error) {
+        if (interval) clearInterval(interval);
         console.error("Erro no upload:", error);
         dom.uploadProgressFill.style.backgroundColor = "var(--color-high-risk)";
         dom.uploadStatusText.innerText = `Erro: ${error.message}`;
@@ -315,6 +365,17 @@ async function handleFileUpload(file) {
             dom.uploadProgressFill.style.backgroundColor = "var(--color-primary)";
         }, 5000);
     }
+}
+
+function showUploadValidationError(message) {
+    dom.uploadProgressContainer.style.display = "block";
+    dom.uploadProgressFill.style.width = "0%";
+    dom.uploadProgressFill.style.backgroundColor = "var(--color-high-risk)";
+    dom.uploadStatusText.innerText = message;
+    setTimeout(() => {
+        dom.uploadProgressContainer.style.display = "none";
+        dom.uploadProgressFill.style.backgroundColor = "var(--color-primary)";
+    }, 5000);
 }
 
 // 7. Reanalisar Contrato
@@ -328,23 +389,39 @@ async function triggerReanalysis(id) {
         });
         
         if (response.ok) {
-            // A análise roda em background. Vamos dar um delay e recarregar
-            setTimeout(async () => {
-                await fetchContracts();
-                await fetchContractDetails(id);
-                await fetchUpcomingAlerts();
-                dom.btnReanalyze.disabled = false;
-                dom.btnReanalyze.innerText = "🔄 Reanalisar";
-            }, 3000);
+            await fetchContracts();
+            await fetchContractDetails(id);
+            await pollAnalysisUntilTerminal(id);
         } else {
-            throw new Error("Erro ao disparar análise.");
+            const payload = await response.json().catch(() => ({}));
+            throw new Error(payload.detail || "Erro ao disparar análise.");
         }
     } catch (error) {
         console.error(error);
-        alert("Erro ao disparar reanálise contratual.");
-        dom.btnReanalyze.disabled = false;
-        dom.btnReanalyze.innerText = "🔄 Reanalisar";
+        alert(error.message || "Erro ao disparar reanálise contratual.");
+        if (appState.selectedContractId === id) await fetchContractDetails(id);
     }
+}
+
+async function pollAnalysisUntilTerminal(id) {
+    if (appState.pollingContracts.has(id)) return null;
+    appState.pollingContracts.add(id);
+    const runningStatuses = new Set(["queued", "processing"]);
+    try {
+        while (appState.selectedContractId === id) {
+            const contract = await fetchContractDetails(id);
+            await fetchContracts();
+            if (!contract || !runningStatuses.has(contract.analysis_status)) {
+                await fetchUpcomingAlerts();
+                await fetchValueLeakage();
+                return contract;
+            }
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+    } finally {
+        appState.pollingContracts.delete(id);
+    }
+    return null;
 }
 
 // 7.1 Terminate Contrato
@@ -360,6 +437,9 @@ async function triggerTermination(id) {
         if (response.ok) {
             const data = await response.json();
             // Abre o cliente de email do usuário
+            if (typeof data.mailto !== "string" || !data.mailto.startsWith("mailto:")) {
+                throw new Error("Resposta de cancelamento inválida.");
+            }
             window.location.href = data.mailto;
         } else {
             alert("Erro ao gerar cancelamento.");
@@ -426,7 +506,8 @@ async function submitQuestion() {
             const data = await response.json();
             appendChatMessage(data.response, "ai-msg");
         } else {
-            appendChatMessage("Desculpe, ocorreu um erro ao consultar o assistente.", "ai-msg");
+            const data = await response.json().catch(() => ({}));
+            appendChatMessage(data.detail || "Erro ao consultar o assistente.", "ai-msg");
         }
     } catch (error) {
         console.error(error);
@@ -458,19 +539,21 @@ function renderContractsList() {
         const item = document.createElement("div");
         item.className = `contract-item ${appState.selectedContractId === c.id ? "selected" : ""}`;
         item.dataset.id = c.id;
-        
-        let scoreClass = "score-high";
-        if (c.health_score < 50) scoreClass = "score-low";
-        else if (c.health_score < 80) scoreClass = "score-medium";
+
+        const rawScore = optionalFiniteNumber(c.health_score);
+        const score = rawScore === null ? null : Math.min(100, Math.max(0, rawScore));
+        const scoreClass = score === null ? "score-unknown" : getHealthScoreClass(score);
+        const scoreLabel = score === null ? "—" : score.toFixed(1);
         
         item.innerHTML = `
             <div class="contract-info">
-                <span class="contract-name" title="${c.title}">${c.title}</span>
-                <span class="contract-vendor">${c.vendor_name}</span>
+                <span class="contract-name" title="${escapeHtml(c.title)}">${escapeHtml(c.title)}</span>
+                <span class="contract-vendor">${escapeHtml(c.vendor_name)}</span>
             </div>
             <div class="contract-meta">
-                <span class="score-badge ${scoreClass}">${c.health_score.toFixed(1)}</span>
-                <span class="badge ${getStatusBadgeClass(c.status)}">${c.status}</span>
+                <span class="score-badge ${scoreClass}">${scoreLabel}</span>
+                <span class="badge ${getStatusBadgeClass(c.status)}">${escapeHtml(c.status)}</span>
+                <span class="badge ${getAnalysisStatusBadgeClass(c.analysis_status)}">${escapeHtml(getAnalysisStatusLabel(c.analysis_status))}</span>
             </div>
         `;
         
@@ -502,7 +585,7 @@ function selectContractItem(id) {
         </div>
     `;
     
-    fetchContractDetails(id);
+    pollAnalysisUntilTerminal(id);
 }
 
 // Renderiza a Ficha de Detalhes do Contrato
@@ -511,23 +594,54 @@ function renderContractDetails(c) {
     dom.viewContractVendor.innerText = `Fornecedor: ${c.vendor_name}`;
     
     // Configura o link para abrir o PDF real
-    dom.btnOpenPdf.href = `/${c.file_path}`;
+    dom.btnOpenPdf.href = `${API_BASE}/api/contracts/${c.id}/file`;
     
     // Dados e vigência
     dom.viewContractStatus.innerText = c.status;
     dom.viewContractStatus.className = `badge ${getStatusBadgeClass(c.status)}`;
+
+    dom.viewAnalysisStatus.innerText = getAnalysisStatusLabel(c.analysis_status);
+    dom.viewAnalysisStatus.className = `badge ${getAnalysisStatusBadgeClass(c.analysis_status)}`;
+    const analysisRunning = ["queued", "processing"].includes(c.analysis_status);
+    dom.btnReanalyze.disabled = analysisRunning;
+    dom.btnReanalyze.innerText = analysisRunning ? "🔄 Analisando..." : "🔄 Reanalisar";
+
+    const analysisMessages = [];
+    if (c.analysis_error) analysisMessages.push(c.analysis_error);
+    if (["failed", "needs_review"].includes(c.analysis_status) && finiteNumber(c.analysis_revision, 0) > 0) {
+        analysisMessages.push("Os resultados exibidos pertencem à última análise concluída com sucesso.");
+    }
+    if (Array.isArray(c.analysis_warnings) && c.analysis_warnings.length > 0) {
+        analysisMessages.push(`Avisos: ${c.analysis_warnings.map(formatAnalysisWarning).join("; ")}`);
+    }
+    dom.analysisMessage.innerText = analysisMessages.join(" ");
+    dom.analysisMessage.style.display = analysisMessages.length > 0 ? "block" : "none";
+    const hasCompletedAnalysis = finiteNumber(c.analysis_revision, 0) > 0;
+    dom.chatInput.disabled = !hasCompletedAnalysis;
+    dom.btnSendChat.disabled = !hasCompletedAnalysis;
+    dom.chatInput.placeholder = hasCompletedAnalysis
+        ? "Digite sua pergunta aqui..."
+        : "Conclua a análise antes de usar o Q&A";
     
-    dom.viewContractHealth.innerText = c.health_score.toFixed(1);
-    dom.viewContractHealth.className = `score-badge ${getHealthScoreClass(c.health_score)}`;
+    const rawHealthScore = optionalFiniteNumber(c.health_score);
+    const healthScore = rawHealthScore === null
+        ? null
+        : Math.min(100, Math.max(0, rawHealthScore));
+    dom.viewContractHealth.innerText = healthScore === null ? "Não disponível" : healthScore.toFixed(1);
+    dom.viewContractHealth.className = `score-badge ${healthScore === null ? "score-unknown" : getHealthScoreClass(healthScore)}`;
     
     dom.viewContractStartDate.innerText = formatDate(c.start_date);
     dom.viewContractEndDate.innerText = formatDate(c.end_date);
-    dom.viewContractAutorenew.innerText = c.auto_renews ? "Sim" : "Não";
-    dom.viewContractNoticeDays.innerText = `${c.renewal_notice_days} dias`;
+    dom.viewContractAutorenew.innerText = c.auto_renews === null
+        ? "Não identificado"
+        : (c.auto_renews ? "Sim" : "Não");
+    dom.viewContractNoticeDays.innerText = c.renewal_notice_days === null
+        ? "Não identificado"
+        : `${c.renewal_notice_days} dias`;
     
     // Valor financeiro
     if (c.financial_value !== null) {
-        dom.viewContractValue.innerText = formatCurrency(c.financial_value);
+        dom.viewContractValue.innerText = formatCurrency(c.financial_value, c.financial_currency);
     } else {
         dom.viewContractValue.innerText = "Não especificado";
     }
@@ -535,18 +649,10 @@ function renderContractDetails(c) {
     
     // Renderiza as cláusulas
     renderClausesList(c.clauses);
+    renderEvidenceList(c.analysis_evidence);
     
-    // Atualiza Risk Badge se OFAC foi mapeado (aqui o payload teria de retornar ofac_status, mas se não tiver, defaultamos)
-    // Se precisarmos que o status real venha, seria ideal adicionar no backend, para este protótipo vamos simular
-    // base no health_score ou se a chave vier na API. 
-    dom.viewVendorRisk.style.display = "inline-block";
-    if (c.health_score < 70) {
-        dom.viewVendorRisk.innerText = "Risk: Elevated";
-        dom.viewVendorRisk.className = "badge badge-danger";
-    } else {
-        dom.viewVendorRisk.innerText = "Risk: Clear";
-        dom.viewVendorRisk.className = "badge badge-success";
-    }
+    // O score de cláusulas não comprova a situação cadastral do fornecedor.
+    dom.viewVendorRisk.style.display = "none";
 }
 
 // Renderiza a Lista de Cláusulas Extraídas
@@ -560,19 +666,45 @@ function renderClausesList(clauses) {
     
     clauses.forEach(cl => {
         const card = document.createElement("div");
-        card.className = `clause-card risk-${cl.risk_level}`;
+        const riskLevel = ["low", "medium", "high"].includes(cl.risk_level)
+            ? cl.risk_level
+            : "unknown";
+        card.className = `clause-card risk-${riskLevel}`;
         
         card.innerHTML = `
             <div class="clause-header">
-                <span class="clause-name">${cl.clause_type}</span>
-                <span class="badge ${getStatusBadgeClassByRisk(cl.risk_level)}">${cl.risk_level}</span>
+                <span class="clause-name">${escapeHtml(cl.clause_type)}</span>
+                <span class="badge ${getStatusBadgeClassByRisk(riskLevel)}">${escapeHtml(riskLevel)}</span>
             </div>
-            <div class="clause-summary">${cl.summary || "Sem resumo."}</div>
-            ${cl.risk_explanation ? `<div class="clause-explanation"><strong>Risco:</strong> ${cl.risk_explanation}</div>` : ""}
-            <div class="clause-text">"${cl.original_text}"</div>
+            <div class="clause-summary">${escapeHtml(cl.summary || "Sem resumo.")}</div>
+            ${cl.risk_explanation ? `<div class="clause-explanation"><strong>Risco:</strong> ${escapeHtml(cl.risk_explanation)}</div>` : ""}
+            <div class="clause-text">"${escapeHtml(cl.original_text)}"</div>
         `;
         
         dom.clausesList.appendChild(card);
+    });
+}
+
+function renderEvidenceList(evidence) {
+    dom.evidenceList.innerHTML = "";
+    if (!Array.isArray(evidence) || evidence.length === 0) {
+        dom.evidenceList.innerHTML = `<div class="empty-state">Nenhuma evidência estruturada disponível.</div>`;
+        return;
+    }
+
+    evidence.forEach(item => {
+        const card = document.createElement("div");
+        card.className = "evidence-card";
+        const confidence = optionalFiniteNumber(item.confidence);
+        const confidenceLabel = confidence === null
+            ? ""
+            : ` · confiança ${(confidence * 100).toFixed(0)}%`;
+        card.innerHTML = `
+            <div class="evidence-field">${escapeHtml(formatEvidenceField(item.field_name))}</div>
+            <div class="evidence-value">${escapeHtml(item.normalized_value ?? "")}${escapeHtml(confidenceLabel)}</div>
+            <blockquote class="evidence-source">${escapeHtml(item.source_text)}</blockquote>
+        `;
+        dom.evidenceList.appendChild(card);
     });
 }
 
@@ -581,7 +713,7 @@ function renderNegotiationSuggestions(suggestions) {
     dom.intelList.innerHTML = "";
     
     if (!suggestions || suggestions.length === 0) {
-        dom.intelList.innerHTML = `<div class="empty-state">Nenhuma sugestão necessária (contrato de baixo risco).</div>`;
+        dom.intelList.innerHTML = `<div class="empty-state">Nenhuma sugestão disponível nesta análise.</div>`;
         return;
     }
     
@@ -590,9 +722,9 @@ function renderNegotiationSuggestions(suggestions) {
         card.className = "intel-card";
         
         card.innerHTML = `
-            <div class="intel-type">💡 ${s.benchmark_type}</div>
-            <div class="intel-rate"><strong>Prazo de Mercado:</strong> ${s.market_rate}</div>
-            <div class="intel-suggestion"><strong>Recomendação:</strong> ${s.suggestion}</div>
+            <div class="intel-type">💡 ${escapeHtml(s.benchmark_type)}</div>
+            <div class="intel-rate"><strong>Prazo de Mercado:</strong> ${escapeHtml(s.market_rate)}</div>
+            <div class="intel-suggestion"><strong>Recomendação:</strong> ${escapeHtml(s.suggestion)}</div>
         `;
         
         dom.intelList.appendChild(card);
@@ -616,13 +748,16 @@ function renderTimeline() {
         if (a.alert_type === "renewal_90d") alertTypeLabel = "Cancelamento (90d)";
         else if (a.alert_type === "renewal_60d") alertTypeLabel = "Cancelamento (60d)";
         else if (a.alert_type === "renewal_30d") alertTypeLabel = "Cancelamento (30d)";
+        else if (a.alert_type === "expiration_90d") alertTypeLabel = "Expiração (90d)";
+        else if (a.alert_type === "expiration_60d") alertTypeLabel = "Expiração (60d)";
+        else if (a.alert_type === "expiration_30d") alertTypeLabel = "Expiração (30d)";
         
         card.innerHTML = `
-            <div class="event-date">⏰ Alerta: ${formatDate(a.trigger_date)}</div>
+            <div class="event-date">⏰ Alerta: ${escapeHtml(formatDate(a.trigger_date))}</div>
             <div class="event-type font-highlight">${alertTypeLabel}</div>
-            <div class="event-title" title="${a.contract_title}">${a.contract_title}</div>
-            <div class="event-vendor">${a.vendor_name}</div>
-            <button class="btn btn-secondary btn-resolve-alert" data-id="${a.id}">Resolver Alerta</button>
+            <div class="event-title" title="${escapeHtml(a.contract_title)}">${escapeHtml(a.contract_title)}</div>
+            <div class="event-vendor">${escapeHtml(a.vendor_name)}</div>
+            <button class="btn btn-secondary btn-resolve-alert">Resolver Alerta</button>
         `;
         
         // Evento para resolver alerta
@@ -651,33 +786,70 @@ function appendChatMessage(text, className) {
 // Calcula Métricas Consolidadas do Portfólio
 function calculateGlobalMetrics() {
     if (appState.contracts.length === 0) {
-        dom.avgHealthScore.innerText = "100.0";
-        dom.avgHealthBar.style.width = "100%";
+        dom.avgHealthScore.innerText = "—";
+        dom.avgHealthBar.style.width = "0%";
         dom.criticalContractsCount.innerText = "0";
         dom.criticalContractsPct.innerText = "0% do portfólio";
-        dom.totalFinancialValue.innerText = "$0.00";
+        dom.totalFinancialValue.innerText = "—";
         return;
     }
     
-    // Média de Saúde
-    const totalHealth = appState.contracts.reduce((sum, c) => sum + c.health_score, 0);
-    const avgScore = totalHealth / appState.contracts.length;
-    dom.avgHealthScore.innerText = avgScore.toFixed(1);
-    dom.avgHealthBar.style.width = `${avgScore}%`;
+    // Métricas de saúde incluem apenas análises concluídas e versionadas.
+    const analyzedContracts = appState.contracts.filter(c =>
+        finiteNumber(c.analysis_revision, 0) > 0 && optionalFiniteNumber(c.health_score) !== null
+    );
+    if (analyzedContracts.length > 0) {
+        const totalHealth = analyzedContracts.reduce(
+            (sum, c) => sum + Math.min(100, Math.max(0, optionalFiniteNumber(c.health_score))),
+            0
+        );
+        const avgScore = totalHealth / analyzedContracts.length;
+        dom.avgHealthScore.innerText = avgScore.toFixed(1);
+        dom.avgHealthBar.style.width = `${avgScore}%`;
+    } else {
+        dom.avgHealthScore.innerText = "—";
+        dom.avgHealthBar.style.width = "0%";
+    }
     
     // Contratos Críticos (health_score < 70)
-    const criticalContracts = appState.contracts.filter(c => c.health_score < 70);
+    const criticalContracts = analyzedContracts.filter(
+        c => optionalFiniteNumber(c.health_score) < 70
+    );
     const criticalCount = criticalContracts.length;
-    const criticalPct = Math.round((criticalCount / appState.contracts.length) * 100);
+    const criticalPct = analyzedContracts.length > 0
+        ? Math.round((criticalCount / analyzedContracts.length) * 100)
+        : 0;
     dom.criticalContractsCount.innerText = criticalCount;
-    dom.criticalContractsPct.innerText = `${criticalPct}% do portfólio`;
+    dom.criticalContractsPct.innerText = `${criticalPct}% dos analisados`;
     
     // Total Financeiro Mapeado
-    const totalVal = appState.contracts.reduce((sum, c) => {
-        if (c.financial_value) return sum + c.financial_value;
-        return sum;
-    }, 0);
-    dom.totalFinancialValue.innerText = formatCurrency(totalVal);
+    const totalsByCurrency = new Map();
+    appState.contracts.forEach(c => {
+        if (
+            finiteNumber(c.analysis_revision, 0) > 0 &&
+            c.financial_value !== null &&
+            typeof c.financial_currency === "string"
+        ) {
+            const current = totalsByCurrency.get(c.financial_currency) || 0;
+            totalsByCurrency.set(
+                c.financial_currency,
+                current + finiteNumber(c.financial_value, 0)
+            );
+        }
+    });
+    if (totalsByCurrency.size === 1) {
+        const [currency, total] = totalsByCurrency.entries().next().value;
+        dom.totalFinancialValue.innerText = formatCurrency(total, currency);
+        dom.totalFinancialValue.title = "";
+    } else if (totalsByCurrency.size > 1) {
+        dom.totalFinancialValue.innerText = "Múltiplas moedas";
+        dom.totalFinancialValue.title = Array.from(totalsByCurrency.entries())
+            .map(([currency, total]) => formatCurrency(total, currency))
+            .join(" · ");
+    } else {
+        dom.totalFinancialValue.innerText = "—";
+        dom.totalFinancialValue.title = "";
+    }
 }
 
 // Helper para classes CSS de badges baseadas no status
@@ -689,6 +861,61 @@ function getStatusBadgeClass(status) {
         case "terminated": return "badge-danger";
         default: return "badge-secondary";
     }
+}
+
+function getAnalysisStatusBadgeClass(status) {
+    switch (status) {
+        case "completed": return "badge-success";
+        case "queued":
+        case "processing": return "badge-info";
+        case "needs_review": return "badge-warning";
+        case "failed": return "badge-danger";
+        default: return "badge-secondary";
+    }
+}
+
+function getAnalysisStatusLabel(status) {
+    const labels = {
+        not_started: "Não analisado",
+        queued: "Na fila",
+        processing: "Analisando",
+        completed: "Análise concluída",
+        needs_review: "Revisão necessária",
+        failed: "Análise falhou",
+        legacy: "Legado não auditado",
+    };
+    return labels[status] || "Estado desconhecido";
+}
+
+function formatEvidenceField(fieldName) {
+    const labels = {
+        financial_value: "Valor financeiro",
+        financial_currency: "Moeda",
+        payment_frequency: "Frequência de pagamento",
+        start_date: "Data de início",
+        end_date: "Data de término",
+        auto_renews: "Renovação automática",
+        renewal_notice_days: "Prazo de aviso",
+    };
+    return labels[fieldName] || fieldName || "Campo";
+}
+
+function formatAnalysisWarning(code) {
+    const labels = {
+        EXTRACTED_TEXT_TRUNCATED: "texto truncado no limite configurado",
+        NO_TARGET_CLAUSES_FOUND: "nenhuma cláusula-alvo foi localizada",
+        FINANCIAL_VALUE_NOT_FOUND: "valor financeiro não identificado",
+        MULTIPLE_FINANCIAL_VALUES_FOUND: "múltiplos valores encontrados; o contexto mais relevante foi selecionado",
+        PAYMENT_FREQUENCY_NOT_FOUND: "frequência de pagamento não identificada",
+        MULTIPLE_PAYMENT_FREQUENCIES_FOUND: "múltiplas frequências de pagamento encontradas",
+        CONTRACT_DATES_NOT_FOUND: "datas contratuais não identificadas",
+        CONTRACT_DATES_NOT_CONTEXTUALIZED: "datas encontradas sem função contratual inequívoca",
+        AMBIGUOUS_NUMERIC_DATE_IGNORED: "data numérica ambígua ignorada",
+        AUTO_RENEWAL_NOT_FOUND: "renovação automática não identificada",
+        NOTICE_PERIOD_NOT_FOUND: "prazo de aviso não identificado",
+        RENEWAL_DEADLINE_UNAVAILABLE: "prazo de renovação indisponível sem aviso expresso",
+    };
+    return labels[code] || code;
 }
 
 // Helper para classes CSS de badges baseadas no nível de risco
@@ -722,12 +949,16 @@ function formatDate(dateStr) {
     }
 }
 
-// Formatar valor para Moeda Dólar
-function formatCurrency(val) {
-    return new Intl.NumberFormat("en-US", {
+// Formatar valor sem atribuir uma moeda que não foi extraída do contrato.
+function formatCurrency(val, currency) {
+    if (!currency || !["USD", "BRL"].includes(currency)) {
+        return `${finiteNumber(val, 0).toFixed(2)} (moeda não identificada)`;
+    }
+    const locale = currency === "BRL" ? "pt-BR" : "en-US";
+    return new Intl.NumberFormat(locale, {
         style: "currency",
-        currency: "USD"
-    }).format(val);
+        currency: currency
+    }).format(finiteNumber(val, 0));
 }
 
 let leakageChartInstance = null;
@@ -751,27 +982,44 @@ function renderValueLeakageChart(data) {
         leakageChartInstance.destroy();
     }
     
-    const labels = data.map(d => d.month);
-    const values = data.map(d => d.total_value);
+    const labels = [...new Set(data.map(d => String(d.month ?? "")))];
+    const currencies = [...new Set(data.map(d => String(d.currency ?? "")))];
+    const colors = [
+        ["rgba(239, 68, 68, 0.7)", "rgb(239, 68, 68)"],
+        ["rgba(59, 130, 246, 0.7)", "rgb(59, 130, 246)"],
+        ["rgba(245, 158, 11, 0.7)", "rgb(245, 158, 11)"],
+    ];
+    const datasets = currencies.map((currency, index) => ({
+        label: `Value at Risk (${currency})`,
+        data: labels.map(month => {
+            const row = data.find(item => item.month === month && item.currency === currency);
+            return row ? finiteNumber(row.total_value, 0) : 0;
+        }),
+        backgroundColor: colors[index % colors.length][0],
+        borderColor: colors[index % colors.length][1],
+        borderWidth: 1,
+        borderRadius: 4,
+    }));
     
     leakageChartInstance = new Chart(ctx, {
         type: 'bar',
         data: {
             labels: labels,
-            datasets: [{
-                label: 'Value at Risk ($)',
-                data: values,
-                backgroundColor: 'rgba(239, 68, 68, 0.7)',
-                borderColor: 'rgb(239, 68, 68)',
-                borderWidth: 1,
-                borderRadius: 4
-            }]
+            datasets: datasets
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-                legend: { display: false }
+                legend: { display: currencies.length > 1 },
+                tooltip: {
+                    callbacks: {
+                        label: context => formatCurrency(
+                            context.parsed.y,
+                            currencies[context.datasetIndex]
+                        )
+                    }
+                }
             },
             scales: {
                 y: { beginAtZero: true }

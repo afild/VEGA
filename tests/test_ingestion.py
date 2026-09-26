@@ -1,28 +1,28 @@
 # tests/test_ingestion.py
+import fitz
 import pytest
-from pathlib import Path
-from app.agents.document_ingestion import run_document_ingestion
-from app.config import settings
 
-def test_document_ingestion_text_file(tmp_path):
-    """Testa se o Document Ingestion Agent lê corretamente arquivos genéricos de texto."""
-    # Cria um arquivo de teste temporário dentro do workspace de teste
-    test_file = tmp_path / "test_contract.txt"
+from app.agents.document_ingestion import DocumentIngestionError, run_document_ingestion
+from app.utils.file_storage import get_contracts_storage_dir
+
+def test_document_ingestion_pdf_inside_contract_storage():
+    """O agente lê um PDF válido quando ele está no storage autorizado."""
+    storage_dir = get_contracts_storage_dir()
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    test_file = storage_dir / "test_contract.pdf"
     test_content = "CONTRATO DE PRESTAÇÃO DE SERVIÇOS DE TI\nContratante: PME Software LTDA\nContratado: Cloud Hosting Inc"
-    test_file.write_text(test_content, encoding="utf-8")
-    
-    # Calcula o caminho relativo à raiz do projeto VEGA para bater com o comportamento esperado
-    try:
-        relative_path = test_file.relative_to(settings.BASE_DIR)
-    except ValueError:
-        # Se tmp_path for fora, usamos o caminho absoluto como string
-        relative_path = str(test_file)
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_textbox((72, 72, 520, 760), test_content)
+    document.save(test_file)
+    document.close()
         
     state = {
         "contract_id": 1,
-        "file_path": str(relative_path),
+        "file_path": str(test_file),
         "raw_text": "",
-        "completed_steps": []
+        "completed_steps": [],
+        "risk_flags": [],
     }
     
     result_state = run_document_ingestion(state)
@@ -31,16 +31,39 @@ def test_document_ingestion_text_file(tmp_path):
     assert "CONTRATO DE PRESTAÇÃO DE SERVIÇOS" in result_state["raw_text"]
     assert "Contratante: PME Software" in result_state["raw_text"]
 
+
+def test_document_ingestion_rejects_file_outside_storage(tmp_path):
+    """Um caminho adulterado não pode transformar o agente em leitor arbitrário."""
+    outside_file = tmp_path / "sensitive.txt"
+    outside_file.write_text("SEGREDO_FORA_DO_STORAGE", encoding="utf-8")
+
+    state = {
+        "contract_id": 2,
+        "file_path": str(outside_file),
+        "raw_text": "",
+        "completed_steps": [],
+        "risk_flags": [],
+    }
+
+    with pytest.raises(DocumentIngestionError) as exc_info:
+        run_document_ingestion(state)
+
+    assert exc_info.value.code == "DOCUMENT_PATH_REJECTED"
+    assert state["raw_text"] == ""
+    assert "document_ingestion" not in state["completed_steps"]
+
 def test_document_ingestion_missing_file():
     """Testa o comportamento do agente quando o arquivo não é encontrado."""
     state = {
         "contract_id": 999,
-        "file_path": "VEGA/app/data/storage/contracts/non_existent_file.pdf",
+        "file_path": str(get_contracts_storage_dir() / "non_existent_file.pdf"),
         "raw_text": "",
         "completed_steps": []
     }
     
-    result_state = run_document_ingestion(state)
-    
-    assert "document_ingestion" in result_state["completed_steps"]
-    assert result_state["raw_text"] == ""
+    with pytest.raises(DocumentIngestionError) as exc_info:
+        run_document_ingestion(state)
+
+    assert exc_info.value.code == "DOCUMENT_NOT_FOUND"
+    assert "document_ingestion" not in state["completed_steps"]
+    assert state["raw_text"] == ""

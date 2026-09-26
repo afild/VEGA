@@ -1,81 +1,137 @@
-import fitz  # PyMuPDF
 import logging
 from pathlib import Path
+
+import fitz  # PyMuPDF
+
 from app.config import settings
+from app.utils.file_storage import resolve_contract_file_path
+
+
+class DocumentIngestionError(RuntimeError):
+    """Falha fatal e segura para exibição durante a ingestão."""
+
+    def __init__(self, code: str, user_message: str) -> None:
+        super().__init__(user_message)
+        self.code = code
+        self.user_message = user_message
+
+
+class DocumentNeedsReviewError(DocumentIngestionError):
+    """Documento válido, mas sem conteúdo textual analisável automaticamente."""
+
 
 def run_document_ingestion(state: dict) -> dict:
-    """Agente de Ingestão de Documentos.
+    """Extrai texto somente de um arquivo autorizado e falha de forma explícita.
 
-    Lê o arquivo de contrato (geralmente PDF) a partir do disco local e extrai todo o texto.
-    Salva o texto extraído no estado (raw_text).
-
-    Args:
-        state (dict): Estado atual do LangGraph (VEGAState).
-
-    Returns:
-        dict: O estado atualizado com o texto bruto do documento.
+    Um documento vazio ou escaneado não recebe marcador textual nem segue para
+    os agentes seguintes. O orquestrador o classifica como ``needs_review``.
     """
+    contract_id = state.get("contract_id")
+    logging.info("[Document Ingestion] Iniciando contrato ID: %s", contract_id)
+
+    file_path = state.get("file_path")
+    if not isinstance(file_path, str) or not file_path:
+        raise DocumentIngestionError(
+            "DOCUMENT_PATH_MISSING",
+            "O caminho do arquivo do contrato não está disponível.",
+        )
+
     try:
-        logging.info(f"[Document Ingestion] Iniciando ingestão do contrato ID: {state.get('contract_id')}")
-        
-        file_path: str = state.get("file_path", "")
-        if not file_path:
-            logging.error("[Document Ingestion] Caminho do arquivo não fornecido no estado.")
-            state["raw_text"] = ""
-            state["completed_steps"].append("document_ingestion")
-            return state
+        abs_path: Path = resolve_contract_file_path(file_path)
+    except (TypeError, ValueError) as exc:
+        raise DocumentIngestionError(
+            "DOCUMENT_PATH_REJECTED",
+            "O arquivo do contrato está fora do armazenamento autorizado.",
+        ) from exc
 
-        # Resolve o caminho do arquivo
-        abs_path: Path = Path(settings.BASE_DIR) / file_path
-        if not abs_path.exists():
-            logging.error(f"[Document Ingestion] Arquivo não encontrado no caminho: {abs_path}")
-            state["raw_text"] = ""
-            state["completed_steps"].append("document_ingestion")
-            return state
+    if not abs_path.is_file():
+        raise DocumentIngestionError(
+            "DOCUMENT_NOT_FOUND",
+            "O arquivo original do contrato não foi encontrado.",
+        )
 
-        raw_text: str = ""
-        suffix: str = abs_path.suffix.lower()
-        
-        try:
-            if suffix == ".pdf":
-                # Abre o PDF usando PyMuPDF (fitz)
-                logging.info(f"[Document Ingestion] Extraindo texto do PDF com PyMuPDF: {abs_path}")
-                doc = fitz.open(abs_path)
-                pages_text = []
-                for page_num in range(len(doc)):
-                    page = doc.load_page(page_num)
-                    pages_text.append(page.get_text("text"))
-                raw_text = "\n".join(pages_text)
-                doc.close()
-            elif suffix == ".docx":
-                # Usando LlamaIndex SimpleDirectoryReader para DOCX como fallback especificado no SDD
-                logging.info(f"[Document Ingestion] Extraindo texto do DOCX usando LlamaIndex: {abs_path}")
-                from llama_index.core import SimpleDirectoryReader
-                reader = SimpleDirectoryReader(input_files=[str(abs_path)])
-                docs = reader.load_data()
-                raw_text = "\n".join([doc.text for doc in docs])
-            else:
-                logging.warning(f"[Document Ingestion] Formato de arquivo não suportado explicitamente: {suffix}. Tentando leitura genérica.")
-                # Fallback de leitura como texto se não for PDF ou DOCX
-                with open(abs_path, "r", encoding="utf-8", errors="ignore") as f:
-                    raw_text = f.read()
-                    
-        except Exception as e:
-            logging.error(f"[Document Ingestion] Erro crítico ao extrair texto do documento: {e}")
-            raw_text = ""
+    suffix = abs_path.suffix.lower()
+    if suffix not in {".pdf", ".docx"}:
+        raise DocumentIngestionError(
+            "UNSUPPORTED_DOCUMENT_TYPE",
+            "O formato do documento não é compatível com a análise.",
+        )
 
-        # Tratamento anti-alucinação se não houver texto extraído
-        if not raw_text.strip():
-            logging.warning("[Document Ingestion] O texto extraído está vazio. O documento pode ser escaneado (imagem sem OCR).")
-            raw_text = "[CONTEÚDO VAZIO - ARQUIVO ESCANEADO OU NÃO IDENTIFICADO]"
+    try:
+        if suffix == ".pdf":
+            raw_text, page_count, truncated = _extract_pdf_text(abs_path)
+        else:
+            raw_text, page_count, truncated = _extract_docx_text(abs_path)
+    except DocumentIngestionError:
+        raise
+    except Exception as exc:
+        logging.exception(
+            "[Document Ingestion] Falha ao extrair o contrato ID %s.", contract_id
+        )
+        raise DocumentIngestionError(
+            "DOCUMENT_EXTRACTION_FAILED",
+            "Não foi possível extrair o texto do documento.",
+        ) from exc
 
-        state["raw_text"] = raw_text
-        state["completed_steps"].append("document_ingestion")
-        
-        logging.info(f"[Document Ingestion] Concluído. Extraídos {len(raw_text)} caracteres de texto.")
-        return state
-        
-    except Exception as e:
-        logging.error(f"[Document Ingestion] Erro inesperado e catastrófico no nó: {e}")
-        state.setdefault("risk_flags", []).append("DOCUMENT_INGESTION_FAILED")
-        return state
+    if not raw_text.strip():
+        raise DocumentNeedsReviewError(
+            "NO_EXTRACTABLE_TEXT",
+            "Nenhum texto foi encontrado. O documento pode ser escaneado e requer OCR ou revisão manual.",
+        )
+
+    state["raw_text"] = raw_text
+    state["document_metadata"] = {
+        "file_type": suffix.removeprefix("."),
+        "page_count": page_count,
+        "extracted_text_chars": len(raw_text),
+        "truncated": truncated,
+    }
+    if truncated:
+        raise DocumentNeedsReviewError(
+            "EXTRACTED_TEXT_TRUNCATED",
+            "O texto excedeu o limite de análise. Revise o documento completo antes de usar os resultados.",
+        )
+    state.setdefault("completed_steps", []).append("document_ingestion")
+
+    logging.info(
+        "[Document Ingestion] Concluído contrato ID %s: %s caracteres.",
+        contract_id,
+        len(raw_text),
+    )
+    return state
+
+
+def _extract_pdf_text(path: Path) -> tuple[str, int, bool]:
+    logging.info("[Document Ingestion] Extraindo PDF: %s", path)
+    pages_text: list[str] = []
+    remaining_chars = settings.MAX_EXTRACTED_TEXT_CHARS
+    truncated = False
+
+    with fitz.open(path) as document:
+        page_count = len(document)
+        for page_number in range(page_count):
+            page_text = document.load_page(page_number).get_text("text")
+            if len(page_text) > remaining_chars:
+                pages_text.append(page_text[:remaining_chars])
+                truncated = True
+                break
+
+            pages_text.append(page_text)
+            remaining_chars -= len(page_text)
+            if remaining_chars <= 0 and page_number < page_count - 1:
+                truncated = True
+                break
+
+    return "\n".join(pages_text), page_count, truncated
+
+
+def _extract_docx_text(path: Path) -> tuple[str, int | None, bool]:
+    logging.info("[Document Ingestion] Extraindo DOCX: %s", path)
+    from llama_index.core import SimpleDirectoryReader
+
+    documents = SimpleDirectoryReader(input_files=[str(path)]).load_data()
+    raw_text = "\n".join(document.text for document in documents)
+    truncated = len(raw_text) > settings.MAX_EXTRACTED_TEXT_CHARS
+    if truncated:
+        raw_text = raw_text[: settings.MAX_EXTRACTED_TEXT_CHARS]
+    return raw_text, None, truncated

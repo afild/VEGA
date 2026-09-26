@@ -1,10 +1,17 @@
 # tests/test_extraction.py
-import pytest
 from datetime import datetime, timedelta
-from app.agents.clause_extraction import run_clause_extraction
+from app.agents.clause_extraction import run_clause_extraction, run_heuristic_extraction
 from app.agents.risk_detector import run_risk_detector
-from app.agents.financial_impact import run_financial_impact
-from app.agents.alert_calendar import run_alert_calendar
+from app.agents.financial_impact import (
+    parse_financial_details_with_evidence,
+    run_financial_impact,
+)
+from app.agents.alert_calendar import (
+    detect_auto_renewal,
+    extract_dates_with_evidence,
+    extract_notice_days,
+    run_alert_calendar,
+)
 
 def test_heuristic_clause_extraction():
     """Valida se o extrator heurístico offline detecta termos de risco."""
@@ -80,7 +87,8 @@ def test_financial_impact_extraction():
     
     assert "financial_impact" in result["completed_steps"]
     assert result["financial_value"] == 1500.0
-    assert result["payment_frequency"] == "monthly" or result["payment_frequency"] == "annual"
+    assert result["payment_frequency"] == "unknown"
+    assert "MULTIPLE_PAYMENT_FREQUENCIES_FOUND" in result["analysis_warnings"]
 
 def test_alert_calendar_generation():
     """Valida a geração de alertas futuros baseados no vencimento do contrato."""
@@ -110,3 +118,98 @@ def test_alert_calendar_generation():
     # Alerta 60d antes do limite = dia 30 (no futuro).
     # Alerta 90d antes do limite = dia 0 (pode ser hoje ou passado dependendo da hora).
     assert len(result["alerts_to_create"]) > 0
+
+
+def test_heuristic_clause_text_is_literal_and_contiguous():
+    raw_text = (
+        "Termination requires 90 days prior notice.\n"
+        "The agreement shall automatically renew every year.\n"
+        "Liability is limited to amounts paid by the customer."
+    )
+
+    clauses = run_heuristic_extraction(raw_text)
+
+    assert len(clauses) == 3
+    for clause in clauses:
+        assert clause["original_text"] in raw_text
+        assert "[...]" not in clause["original_text"]
+        start = clause["source_start"]
+        end = clause["source_end"]
+        assert raw_text[start:end] == clause["original_text"]
+
+
+def test_duplicate_clause_occurrences_do_not_double_penalize_same_risk_type():
+    state = {
+        "contract_id": 1,
+        "clauses_found": [
+            {
+                "clause_type": "Termination",
+                "original_text": "Termination requires 90 days prior notice.",
+                "summary": "",
+                "risk_explanation": "",
+            },
+            {
+                "clause_type": "Termination",
+                "original_text": "A second termination route also requires 120 days notice.",
+                "summary": "",
+                "risk_explanation": "",
+            },
+        ],
+        "risk_flags": [],
+        "completed_steps": [],
+    }
+
+    result = run_risk_detector(state)
+
+    assert result["health_score"] == 75.0
+    assert all(clause["risk_level"] == "high" for clause in result["clauses_found"])
+
+
+def test_financial_extraction_prefers_contract_value_over_larger_penalty():
+    text = (
+        "The total contract value is USD 1,200.00. "
+        "A termination penalty of USD 9,000.00 applies."
+    )
+
+    value, frequency, evidence, warnings = parse_financial_details_with_evidence(text)
+
+    assert value == 1200.0
+    assert frequency == "unknown"
+    assert evidence[0]["source_text"] == "USD 1,200.00"
+    assert text[evidence[0]["source_start"]:evidence[0]["source_end"]] == evidence[0]["source_text"]
+    assert "MULTIPLE_FINANCIAL_VALUES_FOUND" in warnings
+
+
+def test_financial_extraction_preserves_brl_currency():
+    value, frequency, evidence, _ = parse_financial_details_with_evidence(
+        "O valor total do contrato é R$ 2.500,50, pago mensalmente."
+    )
+
+    assert value == 2500.50
+    assert frequency == "monthly"
+    currency_evidence = next(
+        item for item in evidence if item["field_name"] == "financial_currency"
+    )
+    assert currency_evidence["normalized_value"] == "BRL"
+
+
+def test_date_extraction_supports_written_dates_and_rejects_ambiguous_numeric_date():
+    text = (
+        "Effective Date: December 31, 2026. "
+        "Expiration Date: 2 de janeiro de 2028."
+    )
+
+    start_date, end_date, evidence, warnings = extract_dates_with_evidence(text)
+    ambiguous = extract_dates_with_evidence("Contract date: 01/02/2027.")
+
+    assert start_date == "2026-12-31"
+    assert end_date == "2028-01-02"
+    assert {item["field_name"] for item in evidence} == {"start_date", "end_date"}
+    assert warnings == []
+    assert ambiguous[0] is None and ambiguous[1] is None
+    assert "AMBIGUOUS_NUMERIC_DATE_IGNORED" in ambiguous[3]
+
+
+def test_renewal_and_notice_are_not_invented():
+    assert detect_auto_renewal("This agreement shall not automatically renew.") is False
+    assert extract_notice_days("No notice period is stated in this agreement.") is None
